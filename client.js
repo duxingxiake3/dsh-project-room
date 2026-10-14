@@ -2425,7 +2425,20 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
     }
 
     exports.apply = apply;
-    exports.inject = [];
+    /**
+     * Client services this half needs before `apply` runs.
+     *
+     * The client loader gives each entry a Cordis fiber, and an un-injected service
+     * is not merely absent — reading it throws, which puts the fiber in `failed`.
+     * The web boot audit then reports exactly that, with no reason attached:
+     * `web boot: 1 entry did not activate / dsh-project-room: failed`. That is what
+     * kept the desktop app from starting until this array was filled in.
+     *
+     * Only `slots` is required: `apply` registers two slot entries, and a
+     * composition without the slot registry has nowhere to put a panel. Everything
+     * else the panel uses is read lazily through `ctx.get(...)`.
+     */
+    exports.inject = ['slots'];
     /** Exposed for verification only; the module loader uses `apply` and `inject`. */
     exports.__internals = {
       ProjectRoomPanel,

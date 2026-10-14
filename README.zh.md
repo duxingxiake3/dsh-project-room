@@ -184,6 +184,19 @@ npm run check
 npm run test
 ```
 
+### 客户端半边必须声明 `inject`
+
+浏览器半边的 `exports.inject` **不能为空**。客户端加载器会给每个条目一个 Cordis fiber，而**未声明的服务不是"取不到"，是读取就抛错**，fiber 直接进入 `failed`；宿主随后的启动审计只报一句没有原因的：
+
+```
+web boot: 1 entry did not activate
+dsh-project-room: failed
+```
+
+这就是桌面端启动不起来的直接原因。当前声明为 `exports.inject = ['slots']`（`apply` 需要槽位注册表）。凡是 `apply()` 中通过 `ctx.xxx` 直接读取的服务，都必须写进这个数组。
+
+验证方式：`npm run harness` 会在真实 Chromium 里用一个**只提供已声明服务**的代理去执行 `apply`，一旦读了未声明的服务立刻报错——这条规则正是为了让"只报 failed、不给原因"的情况不再发生。
+
 两个测试文件专门锁死曾经真实发生过的加载失败：
 
 - `tests/unit/activation-contract.test.js` —— `inject` 声明必须覆盖 `apply()` 读到的每个服务（否则 Cordis 直接抛错，插件永远不激活）；浏览器半边不得引用任何 chunk。

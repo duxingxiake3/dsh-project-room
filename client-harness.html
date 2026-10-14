@@ -129,6 +129,17 @@
       if (!Array.isArray(exports.inject)) bad('exports.inject must be an array');
       else ok('exports.inject = [' + exports.inject.join(', ') + ']');
 
+      // The client loader gives each entry a Cordis fiber, and an un-injected
+      // service is not merely absent: READING it throws, which lands the fiber in
+      // `failed`. The shell reports that as "web boot: 1 entry did not activate"
+      // with no reason attached — which is exactly how an empty inject array kept
+      // the desktop app from starting.
+      if (!Array.isArray(exports.inject) || exports.inject.indexOf('slots') === -1) {
+        bad('exports.inject must declare the services apply() uses; without "slots" the fiber fails and the desktop reports "web boot: 1 entry did not activate"');
+      } else {
+        ok('inject declares the services apply() needs');
+      }
+
       var foreign = requested.filter(function (s) { return s !== 'react' && s !== 'react/jsx-runtime'; });
       if (foreign.length) bad('the factory required modules outside the closed table: ' + foreign.join(', '));
       else ok('factory required only: ' + (requested.join(', ') || '(nothing)'));
@@ -148,6 +159,16 @@
         get: function () { return undefined; },
         logger: console
       };
+      // The loader hands the entry only what it injected. This proxy fails loudly
+      // on any OTHER service the entry reaches for, which is the same mistake the
+      // real fiber punishes with a bare "failed" in the desktop crash log.
+      ctx = new Proxy(ctx, {
+        get: function (target, property) {
+          if (property in target || typeof property !== 'string') return target[property];
+          bad('apply() read ctx.' + property + ', which exports.inject does NOT declare — the real fiber would fail');
+          return undefined;
+        }
+      });
       try { exports.apply(ctx); }
       catch (error) { bad('apply(ctx) threw: ' + (error && error.stack ? error.stack : String(error))); return finish(); }
 
