@@ -107,6 +107,7 @@ export const Config = {
       };
       stringOrUndefined('dataDir');
       stringOrUndefined('workspaceRoot');
+      stringOrUndefined('memberAgentPreset');
       if (typeof merged.maxAutomaticRounds !== 'number' || !Number.isFinite(merged.maxAutomaticRounds) || merged.maxAutomaticRounds <= 0) {
         issues.push({ message: 'maxAutomaticRounds 必须是正数；0 或负数会让所有自动协作被立即暂停。', path: ['maxAutomaticRounds'] });
       }
@@ -143,6 +144,18 @@ export const DEFAULT_CONFIG = Object.freeze({
   publishFinalReplies: true,
   /** Whether due reminders are swept and invalidated (the design notes). */
   reminders: true,
+  /**
+   * Which agent preset member sessions are created under.
+   *
+   * Deliberately `undefined` by default, i.e. "inherit whatever this host composes".
+   * Leaving it unset is the behaviour that has been measured: on this machine members
+   * then receive the room collaboration tools only, with no file or shell tools.
+   * Setting it is the documented lever for a deployment that wants members to be able
+   * to write and run code (the design notes), but **no preset name is guessed here**: which
+   * value grants those tools is a property of the host's preset catalogue, and
+   * hard-coding a guess would silently change every member's tool surface.
+   */
+  memberAgentPreset: undefined,
 });
 
 /**
@@ -351,6 +364,10 @@ export async function apply(ctx, config = {}) {
             model,
             personaInstructions,
             restrictTools,
+            // Unset means "inherit the host's composition", which is the measured
+            // behaviour. Setting it is how a deployment opts into a preset whose tool
+            // surface includes file and shell tools (see `memberAgentPreset`).
+            agentPreset: options.memberAgentPreset,
           });
 
       store.transaction(() => {

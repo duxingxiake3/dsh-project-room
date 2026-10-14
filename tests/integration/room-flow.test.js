@@ -1266,4 +1266,19 @@ describe('project room — composition root', () => {
     assert.equal(host.tools.length, 15, '工具注册不受提醒开关影响');
     assert.deepEqual(host.logs.error, []);
   });
+
+  it('leaves the member agent preset unset by default, and rejects a non-string one', async () => {
+    const plugin = await import('../../src/host/index.js');
+    const defaults = plugin.Config['~standard'].validate({}).value;
+    // Unset is load-bearing: it is the behaviour that has actually been measured
+    // ("inherit whatever this host composes"). Guessing a preset name here would
+    // silently change every member's tool surface — the very thing this option
+    // exists to make explicit after the AT39 trial found members had no file tools.
+    assert.equal(defaults.memberAgentPreset, undefined);
+    assert.ok(Array.isArray(plugin.Config['~standard'].validate({ memberAgentPreset: 42 }).issues));
+    assert.equal(
+      plugin.Config['~standard'].validate({ memberAgentPreset: 'standard' }).value.memberAgentPreset,
+      'standard',
+    );
+  });
 });
