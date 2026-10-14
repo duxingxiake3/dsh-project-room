@@ -184,7 +184,7 @@
 
       head('component bodies');
       var internals = exports.__internals || {};
-      ['ProjectRoomPanel', 'Composer', 'Timeline', 'Board', 'MemberList', 'MemberDetail', 'CreateRoom', 'MemberMenu', 'Avatar', 'MentionText'].forEach(function (name) {
+      ['ProjectRoomPanel', 'Composer', 'Timeline', 'Board', 'ModelSettings', 'MemberList', 'MemberDetail', 'CreateRoom', 'MemberMenu', 'Avatar', 'MentionText'].forEach(function (name) {
         if (typeof internals[name] !== 'function') { bad('__internals.' + name + ' is missing'); return; }
         try {
           // React is stubbed, so a render returns null; the point is that the

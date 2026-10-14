@@ -145,10 +145,39 @@ export class ModelProfileService {
   }
 
   /**
+   * The model this harness itself is configured to use.
+   *
+   * A brand-new project has no project default and no role defaults, yet the host
+   * always has a working selection. Without this tier the planner could not create
+   * a single member on a fresh project — it threw `MEMBER_UNAVAILABLE` while a
+   * perfectly usable route sat one service away. Reported as `host-default` rather
+   * than silently relabelled `project-default`, so the UI can say where the model
+   * actually came from.
+   *
+   * @returns {{ providerRoute: string, modelId: string, profileRef: string, reasoningEffort?: string } | null}
+   */
+  hostDefault() {
+    try {
+      const selection = this.adapter.ctx?.get?.('agentDefaultModel')?.currentSelection?.();
+      if (!selection?.provider || !selection?.model) return null;
+      return {
+        providerRoute: selection.provider,
+        modelId: selection.model,
+        profileRef: `${selection.provider}/${selection.model}`,
+        ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: String(selection.reasoningEffort) }),
+      };
+    } catch (error) {
+      this.logger?.warn?.(`[project-room] host default model unavailable: ${error?.message ?? error}`);
+      return null;
+    }
+  }
+
+  /**
    * The model a member would use right now, and where that choice came from.
    *
    * This is the single place precedence is decided, so the UI cannot show a
-   * different answer than execution uses.
+   * different answer than execution uses. Order: member-fixed, role default,
+   * project default, then the host's own default.
    *
    * @param {object} member
    * @returns {Promise<{ profileRef: string | null, source: import('../../../shared/contracts.js').SelectionSource, profile: object | null }>}
@@ -172,6 +201,10 @@ export class ModelProfileService {
         source: 'project-default',
         profile: this.store.getModelProfile(settings.projectDefaultProfileRef),
       };
+    }
+    const host = this.hostDefault();
+    if (host) {
+      return { profileRef: host.profileRef, source: 'host-default', profile: this.store.getModelProfile(host.profileRef) };
     }
     return { profileRef: null, source: 'project-default', profile: null };
   }
@@ -274,13 +307,31 @@ export class ModelProfileService {
         reason: '用户为该成员指定了模型。',
       };
     }
-    const roleRef = settings.roleDefaults?.[input.role] ?? settings.projectDefaultProfileRef;
+    const roleRef = settings.roleDefaults?.[input.role];
     if (settings.selectionMode !== 'allowed-pool') {
-      return {
-        profileRef: roleRef ?? null,
-        source: settings.roleDefaults?.[input.role] ? 'role-default' : 'project-default',
-        reason: roleRef ? '按角色/项目默认配置。' : '项目未配置默认模型，需要用户指定。',
-      };
+      if (roleRef) {
+        // Validate against the live catalogue before handing the route to the host,
+        // so a stale role default surfaces here as "this model is unavailable, pick
+        // another" instead of as a mysterious member that never answers.
+        const profile = await this.requireProfile(roleRef);
+        return { profileRef: profile.id, source: 'role-default', reason: `按角色默认配置：${profile.label}。` };
+      }
+      if (settings.projectDefaultProfileRef) {
+        const profile = await this.requireProfile(settings.projectDefaultProfileRef);
+        return { profileRef: profile.id, source: 'project-default', reason: `按项目默认配置：${profile.label}。` };
+      }
+      const host = this.hostDefault();
+      if (host) {
+        // A brand-new project has nothing configured; falling back to the host's own
+        // default is what lets the coordinator build a team at all. Reported as
+        // host-default so the UI can show that nobody chose it.
+        return {
+          profileRef: host.profileRef,
+          source: 'host-default',
+          reason: `项目尚未配置模型，暂用本 Harness 的默认模型 ${host.providerRoute}/${host.modelId}；可在项目设置中固定下来。`,
+        };
+      }
+      return { profileRef: null, source: 'project-default', reason: '项目与本 Harness 都没有可用模型，需要先接入提供方。' };
     }
     const pool = await this.candidatesFor(input.requiredCapabilities ?? [], {
       roomId: input.roomId,

@@ -116,7 +116,11 @@
 
 /**
  * Where a member's effective model came from.
- * @typedef {'project-default' | 'role-default' | 'member-fixed' | 'allowed-pool'} SelectionSource
+ *
+ * `host-default` is deliberately its own value: on a project nobody has configured,
+ * the model comes from the Harness itself, and reporting that as "project default"
+ * would imply the user chose it.
+ * @typedef {'project-default' | 'role-default' | 'member-fixed' | 'allowed-pool' | 'host-default'} SelectionSource
  */
 
 /**

@@ -1092,6 +1092,21 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
       return `${P}dot ${P}dotIdle`;
     }
 
+    /**
+     * Where a member's model came from, as a parenthesised suffix.
+     *
+     * `host-default` says the Harness's own default is in use because nobody chose
+     * one — it must not read as "the project default", which would imply a decision
+     * the user never made.
+     */
+    function selectionSourceLabel(source) {
+      if (source === 'member-fixed') return '（成员固定）';
+      if (source === 'role-default') return '（角色默认）';
+      if (source === 'allowed-pool') return '（允许池自动选择）';
+      if (source === 'host-default') return '（本 Harness 默认，未指定）';
+      return '（项目默认）';
+    }
+
     /* ------------------------------------------------------------------ *
      * Mention-aware text
      * ------------------------------------------------------------------ */
@@ -1534,6 +1549,164 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
     }
 
     /* ------------------------------------------------------------------ *
+     * Right column: model configuration (the design notes)
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Project-level model configuration.
+     *
+     * Without this surface the four-level precedence of the design notes is only half
+     * usable: a member's own dropdown exists, but there is nowhere to state the
+     * project default or the per-role defaults those fall back to. The allowed pool
+     * lives here too, because enabling it without a non-empty pool is refused by the
+     * service — the UI must not offer a switch that cannot work.
+     */
+    function ModelSettings(props) {
+      const { room, models, settings, onSave, hostDefault } = props;
+      const [defaultRef, setDefaultRef] = useState(settings?.projectDefaultProfileRef ?? '');
+      const [roleDrafts, setRoleDrafts] = useState(settings?.roleDefaults ?? {});
+      const [mode, setMode] = useState(settings?.selectionMode ?? 'fixed');
+      const [pool, setPool] = useState(settings?.allowedProfileRefs ?? []);
+      const [busy, setBusy] = useState(false);
+      const [note, setNote] = useState(null);
+
+      // Keep the form in step with the server after a save or a room switch.
+      useEffect(() => {
+        setDefaultRef(settings?.projectDefaultProfileRef ?? '');
+        setRoleDrafts(settings?.roleDefaults ?? {});
+        setMode(settings?.selectionMode ?? 'fixed');
+        setPool(settings?.allowedProfileRefs ?? []);
+      }, [settings, room?.id]);
+
+      const available = (models ?? []).filter((profile) => profile.capabilityStatus !== 'unavailable');
+      const roles = ['coordinator', 'frontend', 'backend', 'tester', 'devops', 'designer', 'docs'];
+      const configuredRoles = roles.filter((role) => (room?.members ?? []).some((member) => member.role === role) || roleDrafts[role]);
+
+      const togglePool = (ref) =>
+        setPool((current) => (current.includes(ref) ? current.filter((entry) => entry !== ref) : [...current, ref]));
+
+      const save = async () => {
+        setBusy(true);
+        setNote(null);
+        try {
+          const result = await onSave({
+            projectDefaultProfileRef: defaultRef || null,
+            roleDefaults: Object.fromEntries(Object.entries(roleDrafts).filter(([, value]) => value)),
+            selectionMode: mode,
+            allowedProfileRefs: mode === 'allowed-pool' ? pool : [],
+          });
+          setNote({ kind: 'ok', text: `已保存。${result?.settings?.selectionMode === 'allowed-pool' ? '自动选型只在允许池内挑选，且不覆盖已锁定的成员。' : '成员默认使用固定选型，不会暗中换模型。'}` });
+        } catch (failure) {
+          setNote({ kind: 'error', text: String(failure?.message ?? failure) });
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      return jsxs('div', {
+        className: `${P}section`,
+        children: [
+          jsx('h4', { className: `${P}sectionTitle`, children: '模型与选型' }),
+
+          jsxs('div', {
+            className: `${P}fieldRow`,
+            children: [
+              jsx('span', { className: `${P}label`, children: '项目默认（没有单独配置的成员使用）' }),
+              jsx('select', {
+                className: `${P}select`,
+                value: defaultRef,
+                onChange: (event) => setDefaultRef(event.target.value),
+                children: [
+                  jsx('option', { value: '', children: hostDefault ? `未设置（暂用本 Harness 默认：${hostDefault.providerRoute}/${hostDefault.modelId}）` : '未设置（本 Harness 也没有可用默认模型）' }),
+                  ...available.map((profile) => jsx('option', { value: profile.profileRef, children: `${profile.label} — ${profile.providerRoute}/${profile.modelId}` })),
+                ],
+              }),
+            ],
+          }),
+
+          jsx('span', { className: `${P}label`, children: '角色默认（覆盖项目默认）' }),
+          ...configuredRoles.map((role) =>
+            jsxs(
+              'div',
+              {
+                style: { display: 'flex', gap: 6, alignItems: 'center', margin: '4px 0' },
+                children: [
+                  jsx('span', { style: { width: 56, flex: 'none', fontSize: 12 }, children: roleTemplate(role)?.title ?? role }),
+                  jsx('select', {
+                    className: `${P}select`,
+                    style: { flex: 1 },
+                    value: roleDrafts[role] ?? '',
+                    onChange: (event) => setRoleDrafts((current) => ({ ...current, [role]: event.target.value })),
+                    children: [
+                      jsx('option', { value: '', children: '跟随项目默认' }),
+                      ...available.map((profile) => jsx('option', { value: profile.profileRef, children: `${profile.label} — ${profile.providerRoute}/${profile.modelId}` })),
+                    ],
+                  }),
+                ],
+              },
+              role,
+            ),
+          ),
+
+          jsxs('div', {
+            className: `${P}fieldRow`,
+            style: { marginTop: 8 },
+            children: [
+              jsx('span', { className: `${P}label`, children: '选型模式' }),
+              jsx('select', {
+                className: `${P}select`,
+                value: mode,
+                onChange: (event) => setMode(event.target.value),
+                children: [
+                  jsx('option', { value: 'fixed', children: 'fixed —— 由我固定每位成员的模型（默认）' }),
+                  jsx('option', { value: 'allowed-pool', children: 'allowed-pool —— 主代理仅在下述允许池内自动选型' }),
+                ],
+              }),
+            ],
+          }),
+
+          mode === 'allowed-pool'
+            ? jsxs('div', {
+                className: `${P}fieldRow`,
+                children: [
+                  jsx('span', { className: `${P}label`, children: `允许池（必须非空；已选 ${pool.length}）` }),
+                  jsx('div', {
+                    className: `${P}scroll`,
+                    style: { maxHeight: 150, border: '.5px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 6 },
+                    children: available.map((profile) =>
+                      jsxs(
+                        'label',
+                        {
+                          className: `${P}check`,
+                          style: { display: 'flex', gap: 6, margin: '3px 0' },
+                          children: [
+                            jsx('input', { type: 'checkbox', checked: pool.includes(profile.profileRef), onChange: () => togglePool(profile.profileRef) }),
+                            `${profile.label}（${profile.providerRoute}/${profile.modelId}）`,
+                          ],
+                        },
+                        profile.profileRef,
+                      ),
+                    ),
+                  }),
+                  jsx('div', { className: `${P}meta`, children: '自动选型不会覆盖被锁定的成员，也不会越出这个池子。' }),
+                ],
+              })
+            : null,
+
+          note ? jsx('div', { className: note.kind === 'error' ? `${P}hint ${P}hintErr` : `${P}hint`, children: note.text }) : null,
+          jsx('button', {
+            type: 'button',
+            className: `${P}btn ${P}btnPrimary} ${P}btnTiny}`,
+            style: { marginTop: 6 },
+            disabled: busy,
+            onClick: () => void save(),
+            children: busy ? '保存中…' : '保存模型配置',
+          }),
+        ],
+      });
+    }
+
+    /* ------------------------------------------------------------------ *
      * Timeline
      * ------------------------------------------------------------------ */
 
@@ -1814,7 +1987,10 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
                       children: `@${member.handle} · ${roleTemplate(member.role)?.title ?? member.role} · ${memberLabel(member.status)}`,
                     }),
                     member.effectiveModel
-                      ? jsx('div', { className: `${P}meta`, children: `${member.effectiveModel.providerRoute}/${member.effectiveModel.modelId}${member.selectionSource === 'member-fixed' ? '（成员固定）' : member.selectionSource === 'role-default' ? '（角色默认）' : member.selectionSource === 'allowed-pool' ? '（允许池）' : '（项目默认）'}` })
+                      ? jsx('div', {
+                          className: `${P}meta`,
+                          children: `${member.effectiveModel.providerRoute}/${member.effectiveModel.modelId}${selectionSourceLabel(member.selectionSource)}`,
+                        })
                       : jsx('div', { className: `${P}meta`, children: '未配置模型' }),
                     member.currentTask
                       ? jsx('div', { className: `${P}meta`, children: `任务：${member.currentTask.objective}（${taskLabel(member.currentTask.status)} r${member.currentTask.revision}）` })
@@ -2210,7 +2386,24 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
         [state, loadRoom],
       );
 
-      // The composer asks for a chip when the avatar menu says "@ 他".
+      /**
+       * Save the project's model configuration.
+       *
+       * The service refuses an allowed-pool mode with an empty pool, so the error is
+       * surfaced as-is rather than pre-empted: the user should see the rule, not a
+       * disabled button with no explanation.
+       */
+      const saveModelSettings = useCallback(
+        async (patch) => {
+          if (!state) throw new Error('还没有选中的项目群。');
+          const result = await post('room.model.settings.set', { roomId: state.room.id, patch });
+          await loadRoom(state.room.id);
+          return result;
+        },
+        [state, loadRoom],
+      );
+
+      /** Manual retry of one delivery the reconciliation marked as failed. */
       const onAction = useCallback(
         async (action, payload) => {
           if (action !== 'retry') return;
@@ -2356,12 +2549,23 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
                   }),
                   jsx('div', {
                     className: `${P}col ${P}colRight`,
-                    children: jsx(Board, {
-                      room: state.room,
-                      board: { ...state.board, members: state.members },
-                      recovery: state.recovery,
-                      onAction,
-                      error: null,
+                    children: jsxs(Fragment, {
+                      children: [
+                        jsx(ModelSettings, {
+                          room: { ...state.room, members: state.members },
+                          models: state.models,
+                          settings: state.modelSettings,
+                          hostDefault: state.modelSettings?.hostDefault ?? null,
+                          onSave: saveModelSettings,
+                        }),
+                        jsx(Board, {
+                          room: state.room,
+                          board: { ...state.board, members: state.members },
+                          recovery: state.recovery,
+                          onAction,
+                          error: null,
+                        }),
+                      ],
                     }),
                   }),
                 ],
@@ -2445,6 +2649,8 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
       Composer,
       Timeline,
       Board,
+      ModelSettings,
+      selectionSourceLabel,
       MemberList,
       MemberDetail,
       CreateRoom,

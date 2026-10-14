@@ -137,7 +137,13 @@ export function registerRoomRoute(services) {
             capabilities: profile.capabilities,
             note: profile.note,
           })),
-          modelSettings: models.settingsOf(payload.roomId),
+          modelSettings: {
+            ...models.settingsOf(payload.roomId),
+            // The fallback tier the user has NOT chosen. Sent separately so the panel
+            // can say "not set — currently using this Harness's default" instead of
+            // presenting someone else's decision as the project's own.
+            hostDefault: models.hostDefault(),
+          },
           routes: models.observedRoutes(),
           capabilities,
           recovery: recovery.inspect(payload.roomId),
