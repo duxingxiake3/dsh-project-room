@@ -188,7 +188,13 @@ export async function apply(ctx, config = {}) {
     onUsage: (invocation) => {
       try {
         store.recordInvocation({
-          id: `inv_${invocation.memberId}_t${invocation.turn ?? 0}s${invocation.step ?? 0}`,
+          // `invocationRef` exists only when a real `(turn, step)` pair was observed,
+          // which is the one case where re-recording means a retry rather than a
+          // different call. Without it the sequence number makes every observation
+          // distinct — the alternative silently merged 104 observations into 4 rows.
+          id: invocation.invocationRef
+            ? `inv_${invocation.memberId}_t${invocation.turn}s${invocation.step}`
+            : `inv_${invocation.memberId}_${invocation.sequence}`,
           roomId: invocation.roomId,
           memberId: invocation.memberId,
           sessionId: invocation.sessionId,
@@ -201,6 +207,15 @@ export async function apply(ctx, config = {}) {
         trace('usage.recorded', {
           memberId: invocation.memberId,
           model: `${invocation.providerRoute}/${invocation.modelId}`,
+          // Carried into the trace so an operator can tell a per-turn call from one
+          // this host reported without turn coordinates, and conversational work from
+          // the host's own bookkeeping calls.
+          turn: invocation.turn,
+          step: invocation.step,
+          purpose: invocation.purpose,
+          // `false` means the host did not name this member's session on the stream,
+          // so the number cannot be split per member on evidence alone.
+          attributed: invocation.attributed,
           usage: invocation.usage,
         });
       } catch (error) {

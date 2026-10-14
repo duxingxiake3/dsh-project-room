@@ -105,7 +105,7 @@ async function fireRequest(agentCtx, seed, turn = 1, step = 1) {
  * Drive the member's `llm/stream` waterfall with a realistic chunk sequence and
  * return what the wrapper handed back to the loop.
  */
-async function runStream(agentCtx, chunks) {
+async function runStream(agentCtx, chunks, options = { provider: 'seed-provider', model: 'seed-model' }) {
   const listeners = agentCtx.listeners.get('llm/stream') ?? [];
   assert.ok(listeners.length > 0, 'the adapter must install an llm/stream listener');
   const seed = async function* () {
@@ -114,7 +114,7 @@ async function runStream(agentCtx, chunks) {
   let call = () => seed();
   for (const listener of listeners) {
     const previous = call;
-    call = () => listener({ provider: 'seed-provider', model: 'seed-model', sessionId: 's' }, previous);
+    call = () => listener(options, previous);
   }
   const passed = [];
   for await (const chunk of await call()) passed.push(chunk);
@@ -144,6 +144,44 @@ async function memberWithUsage(route = { providerRoute: 'pi-ai', modelId: 'glm-4
   const agentCtx = adapter.agentOf('member_backend').ctx;
   return { adapter, agentCtx, recorded };
 }
+
+describe('usage — the observation is scoped to the member the host named', () => {
+  it('ignores a stream the host addressed to a different session', async () => {
+    // The live desktop host recorded four members with identical token counts at the
+    // same instant, repeatedly. One model call observed four times would inflate a
+    // cost report 4x and invent work nobody did, so an explicitly different session
+    // must be dropped rather than attributed.
+    const { agentCtx, recorded } = await memberWithUsage();
+    await fireRequest(agentCtx, { provider: 'seed-provider', model: 'seed-model' });
+    await runStream(
+      agentCtx,
+      [{ type: 'usage', usage: USAGE }, { type: 'finish', reason: { kind: 'stop' } }],
+      { provider: 'seed-provider', model: 'seed-model', sessionId: 'somebody-elses-session' },
+    );
+    assert.equal(recorded.length, 0, 'a call the host attributed elsewhere must not be recorded here');
+  });
+
+  it('records and marks attributed when the host names this member’s own session', async () => {
+    const { adapter, agentCtx, recorded } = await memberWithUsage();
+    await fireRequest(agentCtx, { provider: 'seed-provider', model: 'seed-model' });
+    const own = adapter.agentOf('member_backend').session.id;
+    await runStream(
+      agentCtx,
+      [{ type: 'usage', usage: USAGE }, { type: 'finish', reason: { kind: 'stop' } }],
+      { provider: 'seed-provider', model: 'seed-model', sessionId: own },
+    );
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].attributed, true, 'a stream naming this member is attributable to it');
+  });
+
+  it('records but marks unattributed when the host names no session', async () => {
+    const { agentCtx, recorded } = await memberWithUsage();
+    await fireRequest(agentCtx, { provider: 'seed-provider', model: 'seed-model' });
+    await runStream(agentCtx, [{ type: 'usage', usage: USAGE }, { type: 'finish', reason: { kind: 'stop' } }]);
+    assert.equal(recorded.length, 1, 'a nameless stream is the only evidence available, so it is kept');
+    assert.equal(recorded[0].attributed, false, 'and it is labelled as not attributable on evidence');
+  });
+});
 
 describe('usage — a real call is recorded against the member that made it', () => {
   it('records the provider tokens the stream reported', async () => {
@@ -205,10 +243,39 @@ describe('usage — a real call is recorded against the member that made it', ()
     await runStream(agentCtx, [{ type: 'usage', usage: USAGE }, { type: 'finish', reason: { kind: 'stop' } }]);
     assert.equal(recorded[0].turn, 7);
     assert.equal(recorded[0].step, 3);
+    // A real (turn, step) pair is the only thing allowed to act as an idempotency
+    // key, because only then does re-recording mean "the same call retried".
+    assert.equal(recorded[0].invocationRef, 'member_backend:t7s3');
   });
 
-  it('is wired for a resumed session too, not only a freshly created one', async () => {
-    const host = fakeHost();
+  it('gives every observation its own identity when turn/step are unavailable', async () => {
+    // This is the defect the live desktop host exposed: `agent/request` did not fire
+    // alongside the observed streams, so every call carried turn=null/step=null and
+    // the recorder keyed them all as `t0s0`. 104 real observations collapsed into 4
+    // rows, and the stored total was far below the true one — silently.
+    const { agentCtx, recorded } = await memberWithUsage();
+    for (let index = 0; index < 5; index += 1) {
+      await runStream(agentCtx, [{ type: 'usage', usage: USAGE }, { type: 'finish', reason: { kind: 'stop' } }]);
+    }
+    assert.equal(recorded.length, 5, 'five calls must produce five records');
+    assert.deepEqual(
+      recorded.map((entry) => entry.turn),
+      [null, null, null, null, null],
+      'this host reported no turn coordinates',
+    );
+    assert.deepEqual(
+      recorded.map((entry) => entry.invocationRef),
+      [null, null, null, null, null],
+      'without turn/step there is no honest idempotency key',
+    );
+    assert.equal(
+      new Set(recorded.map((entry) => entry.sequence)).size,
+      5,
+      'each observation needs a distinct sequence number',
+    );
+  });
+
+  it('is wired for a resumed session too, not only a freshly created one', async () => {    const host = fakeHost();
     const recorded = [];
     const adapter = new HostAdapter({
       ctx: host.ctx,

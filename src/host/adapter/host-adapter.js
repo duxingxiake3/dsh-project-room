@@ -669,16 +669,47 @@ export class HostAdapter {
     // Recorded after the stream ends so the counts are the call's final ones, and
     // only when the provider actually reported them: an invented zero would read
     // as "this call was free" rather than "this is unknown".
-    if (!usage || !route) return;
+    // Scoping guard. `llm/stream` is registered on a member's agent context, which
+    // SHOULD mean it only ever sees that member's calls — but on this host four
+    // members recorded identical token counts at the same instant, many times a
+    // minute, which is not four models answering; it is one call observed four
+    // times. Attributing those to four members would inflate every cost report by
+    // 4x and invent work nobody did, so the stream's own session id is checked when
+    // the host supplies one. When it does not, the observation is still recorded
+    // (the scoping is then the only guarantee available) but marked unattributed.
+    const streamSession = input.options?.sessionId ?? null;
+    const scoped = streamSession === null || streamSession === input.sessionId;
+
+    if (!usage || !route || !scoped) return;
     const ref = this.routes.get(input.memberId);
+    const turn = ref?.turn ?? null;
+    const step = ref?.step ?? null;
+    // A sequence number is mandatory, not a nicety. Keying an invocation on
+    // `turn`/`step` alone collapsed observations into one row whenever those were
+    // unavailable: on this host `agent/request` did not fire alongside the observed
+    // streams, so every call keyed as `t0s0` and 104 observations overwrote each
+    // other, leaving 4 rows and a total far below the real one. Only a real
+    // `(turn, step)` pair may act as an idempotency key; otherwise every
+    // observation gets its own identity.
+    this.usageSequence = (this.usageSequence ?? 0) + 1;
     this.onUsage?.({
       memberId: input.memberId,
       roomId: input.roomId,
       sessionId: input.sessionId,
       providerRoute: route.providerRoute,
       modelId: route.modelId,
-      turn: ref?.turn ?? null,
-      step: ref?.step ?? null,
+      turn,
+      step,
+      invocationRef: turn === null || step === null ? null : `${input.memberId}:t${turn}s${step}`,
+      sequence: this.usageSequence,
+      // `GenerateOptions.purpose` distinguishes a conversational call from the
+      // host's own bookkeeping (`'compaction'`, `'session-title'`). It is carried
+      // through so a caller can tell "a member did work" from "the host titled a
+      // session", which is the difference between a cost report and a mystery.
+      purpose: input.options?.purpose ?? null,
+      // Whether the host named this member's session. `false` means the total cannot
+      // be split per member on evidence, only assumed.
+      attributed: streamSession !== null,
       usage,
     });
   }
