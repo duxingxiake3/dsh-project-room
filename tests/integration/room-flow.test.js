@@ -470,6 +470,27 @@ describe('project room — loop guard (AT19)', () => {
     assert.equal(isCourtesy('谢谢'), true);
     assert.equal(isCourtesy('@backend 收到'), false, '带点名的话不是纯社交客套');
     assert.equal(isCourtesy('谢谢，但接口还是不对'), false, '带真实内容的话不能被当成客套吞掉');
+
+    // A confirmation with a short polite tail is still a confirmation.
+    //
+    // The live AT39 trial produced ~180 messages of exactly these shapes ("收到，无补充。" /
+    // "确认，#461 与我的自述一致。") in about two minutes, and the guard missed every one of
+    // them, because the older patterns required the acknowledgement to be the entire
+    // message. §14.4 names "反复『收到/谢谢』" as the case that must stop, so these
+    // strings are pinned from the real room.
+    for (const text of ['收到，闭环确认，无补充。', '收到，无补充。两边都静止，等执行环境。', '收到，无补充。', '确认，#461 的汇总与我的自述一致。']) {
+      assert.equal(isCourtesy(text), true, `应当识别为客套：${text}`);
+    }
+    // ...while a bounded tail must not become a licence to swallow work. Each of these
+    // carries a fact, a request or a claim of progress.
+    for (const text of [
+      '收到。我这边脚本写好了，等你给执行环境就跑。',
+      '收到，但服务端冷却未按手机号判定这个问题还没修，请先修。',
+      '任务 task_5473d796f1 维持 blocked（r16），零命令、零退出码。',
+      '@backend 收到，你 r5/r6/r8 的重报和我 #310 那份可以对上了。',
+    ]) {
+      assert.equal(isCourtesy(text), false, `不能被当成客套吞掉：${text}`);
+    }
     const allowed = [];
     for (let round = 0; round < 6; round += 1) {
       const body = round % 2 === 0 ? '收到' : '谢谢';

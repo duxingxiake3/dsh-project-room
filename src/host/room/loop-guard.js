@@ -27,6 +27,27 @@ const COURTESY_PATTERNS = [
 ];
 
 /**
+ * A bare acknowledgement with a short trailing clause, and nothing actionable in it.
+ *
+ * This case was missing, and the live AT39 trial showed what that costs: two members
+ * exchanged roughly 180 messages of the form "收到，无补充。" / "确认，#461 与我的自述一致。"
+ * over about two minutes, each one individually harmless, and the guard never saw a
+ * courtesy chain because the old patterns required the acknowledgement to be the WHOLE
+ * message. the design notes names exactly this pair — "反复『收到/谢谢』" — as the case that
+ * must stop, so the rule has to survive a polite tail.
+ *
+ * The tail is bounded twice over, because a guard that swallows a message carrying work
+ * is worse than one that misses politeness. It may not run past 32 characters and may
+ * not contain a digit or any work verb that means something concrete is happening or is
+ * being asked for. Digits are the strongest signal available: seq numbers, revisions,
+ * exit codes and counts are how this plugin's members say "here is a fact". A bare `#`
+ * therefore stays inside the rule (it is only a cross-reference on its own), while
+ * "#461" and "r16" and "退出码 0" do not.
+ */
+const ACK_WITH_TAIL =
+  /^(收到|了解|明白|确认|同意|认可|无补充|无待办|无异议|一致|照此|OK)[\s,，:：、]*(?:(?:#\d{1,4})|(?:(?!\d)(?!(?:写|脚本|跑|实现|修复|测试|提交|改|发现|报错|失败|阻塞|进度|请))[^\n])){0,32}$/;
+
+/**
  * Whether a body is purely a social closer — no question, no request, no result.
  *
  * Deliberately conservative: anything carrying a question mark, a mention with
@@ -44,7 +65,7 @@ export function isCourtesy(body) {
   if (/```|`/.test(text)) return false;
   if (/@/.test(text)) return false;
   if (/(请|麻烦|帮我|改成|实现|修复|测试|提交|发现问题|不对|报错|失败|阻塞|进度)/.test(text)) return false;
-  return COURTESY_PATTERNS.some((pattern) => pattern.test(text));
+  return COURTESY_PATTERNS.some((pattern) => pattern.test(text)) || ACK_WITH_TAIL.test(text);
 }
 
 /**
