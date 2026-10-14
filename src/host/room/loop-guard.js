@@ -81,6 +81,26 @@ export function fingerprint(body) {
 }
 
 /**
+ * Whether one automatic round brings something the chain has not already seen:
+ * a new question, a new request, a new result or new evidence.
+ *
+ * Only rounds that bring nothing are charged against the automatic-round budget.
+ * The design forbids a fixed maximum number of discussion rounds (§17.1) and
+ * only treats a chain as an anomaly when it adds no new question, no new
+ * evidence and no progress (§17.2), so a discussion that keeps producing new
+ * substance must not be cut off — an unproductive chain still stops (AT19).
+ *
+ * @param {{ fingerprints: string[] }} chain
+ * @param {string} body
+ * @returns {boolean}
+ */
+function addsNewSubstance(chain, body) {
+  if (!asksSomething(body)) return false;
+  const print = fingerprint(body);
+  return print !== '' && !chain.fingerprints.includes(print);
+}
+
+/**
  * Per-room automatic-wake ledger.
  *
  * It records automatic wakes by causal chain so the guard can answer three
@@ -153,7 +173,7 @@ export class LoopGuard {
       };
     }
 
-    if (chain.rounds >= this.maxAutomaticRounds) {
+    if (chain.rounds >= this.maxAutomaticRounds && !addsNewSubstance(chain, input.body)) {
       this.paused.add(chainKey);
       this.incidents.push({
         roomId: input.roomId,
@@ -182,7 +202,8 @@ export class LoopGuard {
   record(input) {
     const chainKey = `${input.roomId}|${input.causalRootId}`;
     const chain = this.chains.get(chainKey) ?? { rounds: 0, wakes: [], fingerprints: [], lastAuthor: null };
-    chain.rounds += 1;
+    // A round that carries new substance is not spending the chain's budget.
+    if (!addsNewSubstance(chain, input.body)) chain.rounds += 1;
     chain.lastAuthor = input.authorId;
     if (chain.fingerprints.length < 40) chain.fingerprints.push(fingerprint(input.body));
     this.chains.set(chainKey, chain);

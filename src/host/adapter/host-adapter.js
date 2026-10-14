@@ -5,13 +5,18 @@
  * in the plugin talks to this interface, so a host API change is fixed here
  * rather than across the codebase.
  *
- * Verified against the desktop host 0.1.7-rc.1 (Node 24.18.1 / Electron 44) —
- * see `notes/host notes` for the exact evidence behind every method
- * below. Facts this file depends on:
+ * Verified against the desktop host PACKAGED runtime **0.2.0-rc.2**
+ * (`<DSH-APP>\resources\app.asar\dsh\node_modules\@deepseek-ai\*`, Electron 44 /
+ * Node 24.18.1) — see `notes/host notes` for the exact evidence behind
+ * every method below. A second, different install (`0.1.7-rc.1`) exists on this
+ * machine and is NOT the live one; `scripts/read-asar.mjs` exists so the packaged
+ * copy can be read directly instead of assumed. Facts this file depends on:
  *
- *   - `ctx.agents.createAgent(ownerCtx, { sessionId, meta, agentOptions, setup })`
- *     returns `{ agent, dispose }`. The handle is the ownership capability, so
- *     the plugin can stop its own members and can never dispose a borrowed one.
+ *   - `ctx.agents.create({ sessionId, meta, agentOptions, setup })` and
+ *     `ctx.agents.resume({ resumeSessionId, ... })` are the registry facade; the
+ *     `createAgent(ownerCtx, options)` form belongs to the AgentFactory, not to
+ *     `ctx.agents`. Either way the handle is the ownership capability, so the
+ *     plugin can stop its own members and can never dispose a borrowed one.
  *   - `setup(agentCtx, agent)` registers agent-scoped contributions BEFORE
  *     publication, and listeners registered through `agentCtx` are unwound when
  *     the agent is disposed.
@@ -31,6 +36,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
 import { ENVELOPE_PROTOCOL, RoomError } from '../../../shared/contracts.js';
@@ -96,6 +102,8 @@ export class HostAdapter {
     this.capabilitiesCache = null;
     /** Requests observed per member route, kept as evidence that routing is real. */
     this.routes = new Map();
+    /** Tool names actually removed per member, so the UI can state the real surface. */
+    this.toolRestrictions = new Map();
     this.disposed = false;
   }
 
@@ -120,6 +128,10 @@ export class HostAdapter {
       }
     };
     const notes = [];
+    const core = readDshVersion();
+    if (core.version === 'unknown') {
+      notes.push('无法确定当前运行的核心版本，兼容性声明按未验证处理。');
+    }
 
     const ownedSessions = has('agents') && has('agentLoop') && has('sessionPersistence');
     if (!ownedSessions) notes.push('无法创建插件拥有的独立会话：缺少 agents / agentLoop / sessionPersistence。');
@@ -150,9 +162,10 @@ export class HostAdapter {
       // restarting the session or repeating side effects.
       safeModelRebinding: perMemberModelRouting,
       sqlite: true,
-      dshVersion: readDshVersion(),
+      dshVersion: core.version,
       nodeVersion: process.versions.node,
       electronVersion: process.versions.electron ?? '',
+      coreResolvedFrom: core.resolvedFrom,
       notes,
     };
     this.capabilitiesCache = capabilities;
@@ -297,7 +310,12 @@ export class HostAdapter {
     const selection = { current: input.model ? { ...input.model } : null };
     const adapter = this;
 
-    const handle = await ctx.agents.createAgent(ctx, {
+    // `ctx.agents.create(options)` is the registry facade: ownership follows the
+    // context the call is made from (the plugin fiber), while the
+    // `createAgent(ownerCtx, options)` form belongs to the AgentFactory on
+    // `ctx.agentLoop`. Verified against the installed `dsh-agent/lib/index.js`:
+    // AgentRegistry.create reads `ownerCtx = this.ctx` itself.
+    const handle = await ctx.agents.create({
       sessionId,
       meta: {
         cwd: input.cwd,
@@ -330,13 +348,7 @@ export class HostAdapter {
         // 3. Per-member tool surface. A detail-only member (designer, docs) gets
         //    coordination tools but no shell or file writers, so "no permission to
         //    change code" is enforced rather than requested.
-        if (input.restrictTools) {
-          try {
-            agentCtx.tools.restrict({ deny: ['bash', 'pwsh', 'write', 'edit', 'str_replace_editor'] });
-          } catch (error) {
-            adapter.logger?.warn?.(`[project-room] tool restriction skipped for ${input.memberId}: ${error?.message ?? error}`);
-          }
-        }
+        adapter.#restrictWriteTools(agentCtx, input.memberId);
         return undefined;
       },
     });
@@ -365,7 +377,7 @@ export class HostAdapter {
     }
     const selection = { current: input.model ? { ...input.model } : null };
     const adapter = this;
-    const handle = await ctx.agents.resume(ctx, {
+    const handle = await ctx.agents.resume({
       resumeSessionId: input.sessionId,
       agentOptions: input.model ? { provider: input.model.providerRoute, model: input.model.modelId } : {},
       setup: (agentCtx) => {
@@ -384,11 +396,7 @@ export class HostAdapter {
           });
         }
         if (input.restrictTools) {
-          try {
-            agentCtx.tools.restrict({ deny: ['bash', 'pwsh', 'write', 'edit', 'str_replace_editor'] });
-          } catch {
-            /* restriction is best-effort; the member still works without it */
-          }
+          adapter.#restrictWriteTools(agentCtx, input.memberId);
         }
         return undefined;
       },
@@ -593,6 +601,44 @@ export class HostAdapter {
   }
 
   /**
+   * Remove code-writing tools from a detail-only member's surface.
+   *
+   * `ctx.tools.restrict()` refuses the WHOLE filter when any name is unknown, so
+   * a hardcoded list silently stops working the moment a profile names its shell
+   * tool differently (`pwsh` here, `bash` there). This intersects the desired
+   * deny list with what the registry actually exposes, and reports exactly which
+   * names it could enforce — a restriction that quietly did nothing would be
+   * worse than no restriction, because the UI would claim it.
+   *
+   * @param {object} agentCtx
+   * @param {string} memberId
+   */
+  #restrictWriteTools(agentCtx, memberId) {
+    const desired = ['bash', 'pwsh', 'shell', 'write', 'edit', 'str_replace_editor', 'str-replace-editor', 'apply_patch'];
+    let available = [];
+    try {
+      available = (agentCtx.tools?.schemas?.() ?? []).map((schema) => schema.name);
+    } catch (error) {
+      this.logger?.warn?.(`[project-room] cannot enumerate tools for ${memberId}: ${error?.message ?? error}`);
+      return;
+    }
+    const deny = desired.filter((name) => available.includes(name));
+    if (deny.length === 0) {
+      this.logger?.warn?.(
+        `[project-room] no code-writing tool could be restricted for ${memberId}; available tools: ${available.join(', ') || '(none)'}`,
+      );
+      return;
+    }
+    try {
+      agentCtx.tools.restrict({ deny });
+      this.toolRestrictions.set(memberId, deny);
+      this.emit({ type: 'member-tools-restricted', memberId, deny });
+    } catch (error) {
+      this.logger?.warn?.(`[project-room] tool restriction failed for ${memberId}: ${error?.message ?? error}`);
+    }
+  }
+
+  /**
    * Release nothing on unload except the plugin's own members. Borrowed user
    * sessions are explicitly left alone (the design notes).
    * @returns {Promise<void>}
@@ -620,23 +666,45 @@ export function newSessionId(roomId, memberId) {
 }
 
 /**
- * Read the installed core version.
+ * Read the core version this process is actually running.
  *
- * The profile keeps every `@deepseek-ai` package at one version, so the base
- * bundle's own manifest is the authoritative statement of the running core.
- * Resolution is attempted from the profile root because this plugin is linked
- * outside it; a miss is reported as `unknown` rather than guessed.
- * @returns {string}
+ * Two installs can exist side by side on one machine (a desktop app bundle and a
+ * CLI install), and only one of them is live. Guessing from a path would be
+ * exactly the mistake the design warns about, so this asks the running process:
+ * resolve the framework package from THIS module's own location and read the
+ * version off whatever it finds.
+ *
+ * @returns {{ version: string, resolvedFrom: string | null }}
  */
-function readDshVersion() {
+export function readDshVersion() {
+  const candidates = [
+    '@deepseek-ai/dsh-agent/package.json',
+    '@deepseek-ai/dsh-tools/package.json',
+    '@deepseek-ai/dsh-base/package.json',
+  ];
+  for (const specifier of candidates) {
+    try {
+      const require = createRequire(import.meta.url);
+      const resolved = require.resolve(specifier);
+      const parsed = JSON.parse(readFileSync(resolved, 'utf8'));
+      if (typeof parsed.version === 'string') {
+        return { version: parsed.version, resolvedFrom: resolved };
+      }
+    } catch {
+      // Try the next candidate: an install may ship one package and not another.
+    }
+  }
+  // The plugin is linked outside the profile, so its own resolution walk may
+  // legitimately fail; the profile root is the last honest place to look.
   try {
     const profileDir = process.env.DSH_PROFILE_DIR;
-    if (!profileDir) return 'unknown';
-    const manifest = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json');
-    const raw = readFileSync(manifest, 'utf8');
-    const parsed = JSON.parse(raw);
-    return typeof parsed.version === 'string' ? parsed.version : 'unknown';
+    if (profileDir) {
+      const manifest = join(profileDir, 'node_modules', 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json');
+      const parsed = JSON.parse(readFileSync(manifest, 'utf8'));
+      return { version: parsed.version ?? 'unknown', resolvedFrom: manifest };
+    }
   } catch {
-    return 'unknown';
+    // fall through to the honest unknown
   }
+  return { version: 'unknown', resolvedFrom: null };
 }

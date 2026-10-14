@@ -178,7 +178,7 @@ export class MessageService {
           this.store.upsertDelivery({
             messageId,
             recipientId: target.memberId,
-            status: target.deliverable ? 'pending' : 'discarded',
+            status: target.deliverable ? 'pending' : target.retained ?? 'discarded',
             requestedMode: target.mode,
             deliveryAttempt: 0,
             detail: target.deliverable ? null : target.reason,
@@ -286,7 +286,7 @@ export class MessageService {
     /** @type {Map<string, { memberId: string, deliverable: boolean, reason: string | null, mode: 'queue' | 'steer' }>} */
     const out = new Map();
 
-    const add = (memberId, reason, deliverable) => {
+    const add = (memberId, reason, deliverable, retained = null) => {
       if (memberId === author.id) return; // @自己 is a note, never a self-wake
       const member = members.get(memberId);
       if (!member) return;
@@ -295,7 +295,7 @@ export class MessageService {
         existing.deliverable = existing.deliverable || deliverable;
         return;
       }
-      out.set(memberId, { memberId, deliverable, reason, mode: 'queue' });
+      out.set(memberId, { memberId, deliverable, reason, mode: 'queue', retained });
     };
 
     for (const mention of resolved) {
@@ -306,16 +306,21 @@ export class MessageService {
           deliverable: false,
           reason: '该成员已不在本群，消息保留为不可投递。',
           mode: 'queue',
+          retained: 'discarded',
         });
         continue;
       }
       if (target.kind === 'human') {
-        // A human recipient is a notification, never a model invocation.
-        add(target.id, '人类成员：仅通知，不产生模型调用。', false);
+        // A human recipient is a notification, never a model invocation. The
+        // row starts as `pending` so the coordinator records the notification
+        // state (the design notes) instead of claiming the host discarded it.
+        add(target.id, '人类成员：仅通知，不产生模型调用。', false, 'pending');
         continue;
       }
       if (target.status === 'paused') {
-        add(target.id, '该成员已暂停，消息保留为待处理。', false);
+        // `paused` is a state of its own: the message is kept, not cancelled,
+        // and an explicit resume is what wakes the member again (the design notes).
+        add(target.id, '该成员已暂停，消息保留为待处理。', false, 'paused');
         continue;
       }
       if (target.status === 'offline') {
@@ -359,15 +364,11 @@ export class MessageService {
   }
 
   #samePayload(stored, expectedHash) {
-    return (
-      hashOf({
-        body: stored.body,
-        mentions: stored.mentions,
-        replyTo: stored.replyTo ?? null,
-        threadId: stored.threadId ?? null,
-        taskId: stored.taskId ?? null,
-      }) === expectedHash
-    );
+    // `payload_hash` was written from the request itself (body, structured
+    // mentions, replyTo, threadId, taskId), so a retry of the same request
+    // compares equal — while `mentions` in the row holds the RESOLVED targets
+    // and could not be compared with a raw request (the design notes, AT09).
+    return stored.payloadHash === expectedHash;
   }
 }
 

@@ -135,6 +135,20 @@ export function createFakeHost(options = {}) {
           record.toolRestrictions.push(definition);
           return () => {};
         },
+        /**
+         * The tool names this member's surface currently exposes. The adapter
+         * intersects its deny list with whatever the registry really has, so a
+         * fake that returned nothing would silently hide that logic.
+         */
+        schemas() {
+          return [
+            { name: 'read' },
+            { name: 'bash' },
+            { name: 'write' },
+            { name: 'edit' },
+            { name: 'room_send' },
+          ];
+        },
       },
       systemPrompt: {
         /** Record an agent-scoped prompt section. */
@@ -199,7 +213,7 @@ export function createFakeHost(options = {}) {
     order.push(record);
 
     if (typeof input.setup === 'function') input.setup(agentCtx, agent);
-    return {
+    const handle = {
       agent,
       async dispose() {
         record.disposed = true;
@@ -207,10 +221,22 @@ export function createFakeHost(options = {}) {
         agent.status = 'idle';
       },
     };
+    record.handle = handle;
+    return handle;
   }
 
   const agentsService = {
     /**
+     * The registry facade the adapter calls: ownership follows the context the
+     * call is made from, so no owner context is passed here.
+     * @param {object} agentOptions
+     */
+    async create(agentOptions) {
+      return spawn({ ...agentOptions, service: 'create' });
+    },
+    /**
+     * The AgentFactory form (`createAgent(ownerCtx, options)`). Kept because the
+     * plugin has called both shapes; the fake answers whichever one is used.
      * @param {object} _ownerCtx
      * @param {object} agentOptions
      */
@@ -218,17 +244,20 @@ export function createFakeHost(options = {}) {
       return spawn({ ...agentOptions, service: 'createAgent' });
     },
     /**
-     * @param {object} _ownerCtx
      * @param {object} resumeOptions
      */
-    async resume(_ownerCtx, resumeOptions) {
-      const record = spawn({
+    async resume(resumeOptions) {
+      const handle = spawn({
         ...resumeOptions,
         sessionId: resumeOptions.resumeSessionId,
         service: 'resume',
       });
-      record.recovered.push(resumeOptions.resumeSessionId);
-      return record;
+      records.get(resumeOptions.resumeSessionId)?.recovered.push(resumeOptions.resumeSessionId);
+      return handle;
+    },
+    /** The pre-facade alias, for the same reason as `createAgent`. */
+    async resumeAgent(_ownerCtx, resumeOptions) {
+      return agentsService.resume(resumeOptions);
     },
   };
 
@@ -596,6 +625,9 @@ export function createRoomStack(options = {}) {
   });
   const decisions = new DecisionService({ store, rooms, tasks, messages, logger });
   const observer = new TurnObserver({ store, adapter, messages, delivery, logger });
+  // Same wiring as the composition root: durable session events are what prove a
+  // specific input entered a turn, and what publishes a member's final reply.
+  observer.attachHost(host.ctx);
   const recovery = new RecoveryService({ store, rooms, adapter, delivery, observer, planning, decisions, models, logger });
 
   return {

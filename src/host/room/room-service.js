@@ -284,7 +284,13 @@ export class RoomService {
       });
       return created;
     });
-    this.store.updateDispatch(dispatchKey, { state: 'created', detail: JSON.stringify({ memberId: member.id }) });
+    this.store.updateDispatch(dispatchKey, {
+      state: 'created',
+      // Recording the member id on the intent row is what makes a retry reuse
+      // this member instead of creating a second one (the design notes, AT41).
+      memberId: member.id,
+      detail: JSON.stringify({ memberId: member.id }),
+    });
 
     let warning = null;
     try {

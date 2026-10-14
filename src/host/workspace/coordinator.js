@@ -129,7 +129,7 @@ export class WorkspaceCoordinator {
    * @param {object} input
    * @param {string} input.roomId
    * @param {string} input.attemptId
-   * @returns {{ repoId: string | null, baseCommit: string | null, headCommit: string | null, branch: string | null, changedPaths: string[], diffStat: string | null, reason: string }}
+   * @returns {{ repoId: string | null, baseCommit: string | null, headCommit: string | null, branch: string | null, changedPaths: string[], renamedFrom: string[], diffStat: string | null, reason: string }}
    */
   collectChanges(input) {
     const attempt = this.store.getAttempt(input.attemptId);
@@ -137,17 +137,21 @@ export class WorkspaceCoordinator {
     const room = this.rooms.requireRoom(input.roomId);
     const path = attempt.worktreeRef ?? room.workspaceRef;
     if (!path) {
-      return { repoId: null, baseCommit: null, headCommit: null, branch: null, changedPaths: [], diffStat: null, reason: '没有可用的工作目录。' };
+      return { repoId: null, baseCommit: null, headCommit: null, branch: null, changedPaths: [], renamedFrom: [], diffStat: null, reason: '没有可用的工作目录。' };
     }
     const repo = this.#repoInfo(path);
     if (!repo.isRepo) {
-      return { repoId: null, baseCommit: null, headCommit: null, branch: null, changedPaths: [], diffStat: null, reason: '工作目录不是 git 仓库，无法收集变更清单。' };
+      return { repoId: null, baseCommit: null, headCommit: null, branch: null, changedPaths: [], renamedFrom: [], diffStat: null, reason: '工作目录不是 git 仓库，无法收集变更清单。' };
     }
     try {
-      const changed = this.#git(path, ['status', '--porcelain'])
+      const status = this.#git(path, ['status', '--porcelain'])
         .split('\n')
         .map((line) => line.slice(3).trim())
         .filter(Boolean);
+      // `git status` prints `old -> new` for a rename; the integration tree needs
+      // one entry for the new path plus the source it came from, never two
+      // unrelated-looking files (the design notes).
+      const { changed, renamedFrom } = splitChanges(status);
       const diffStat = this.#git(path, ['diff', '--stat', repo.head]).trim();
       return {
         repoId: repo.repoId,
@@ -155,6 +159,7 @@ export class WorkspaceCoordinator {
         headCommit: this.#git(path, ['rev-parse', 'HEAD']).trim(),
         branch: repo.branch,
         changedPaths: changed,
+        renamedFrom,
         diffStat: diffStat || null,
         reason: 'ok',
       };
@@ -165,6 +170,7 @@ export class WorkspaceCoordinator {
         headCommit: null,
         branch: repo.branch,
         changedPaths: [],
+        renamedFrom: [],
         diffStat: null,
         reason: `变更收集失败：${String(error?.message ?? error)}`,
       };
@@ -315,4 +321,48 @@ export class WorkspaceCoordinator {
       return false;
     }
   }
+}
+
+/**
+ * Split a git status path list into changed paths and renamed-from paths, so a
+ * rename is reported as one entry rather than two unrelated files.
+ *
+ * Handles both shapes `git status --porcelain` emits for one entry:
+ *   - `src/login.tsx`
+ *   - `src/old.ts -> src/new.ts` (rename or copy)
+ *
+ * A path git quoted because it contains spaces or other special characters is
+ * unquoted rather than split in two.
+ *
+ * @param {string[]} changedPaths
+ * @returns {{ changed: string[], renamedFrom: string[] }}
+ */
+export function splitChanges(changedPaths) {
+  const changed = [];
+  const renamedFrom = [];
+  for (const entry of Array.isArray(changedPaths) ? changedPaths : []) {
+    const line = String(entry ?? '').trim();
+    if (!line) continue;
+    const arrow = line.indexOf(' -> ');
+    if (arrow < 0) {
+      changed.push(unquoteGitPath(line));
+      continue;
+    }
+    const from = unquoteGitPath(line.slice(0, arrow));
+    const to = unquoteGitPath(line.slice(arrow + 4));
+    if (from) renamedFrom.push(from);
+    if (to) changed.push(to);
+  }
+  return { changed, renamedFrom };
+}
+
+/**
+ * Strip the surrounding quotes git adds around a path with special characters.
+ * @param {string} value
+ * @returns {string}
+ */
+function unquoteGitPath(value) {
+  const text = String(value ?? '').trim();
+  if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
+  return text;
 }

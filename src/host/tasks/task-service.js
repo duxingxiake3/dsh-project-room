@@ -335,7 +335,10 @@ export class TaskService {
 
     const artifacts = this.store.listArtifacts(task.roomId, { taskId: task.id });
     const verifiedReferences = artifacts.filter((artifact) => artifact.verified).length;
-    if (input.passed && verifiedReferences === 0 && evidence.length === 0) {
+    if (input.passed && verifiedReferences === 0) {
+      // A pass must rest on at least one artifact that was really checked; a
+      // member's sentence "tests passed" is stored as an unverified artifact and
+      // therefore cannot reach acceptance (the design notes, AT25).
       throw new RoomError('ARTIFACT_NOT_VERIFIED', '没有可核验的产物引用，不能判定通过。');
     }
 

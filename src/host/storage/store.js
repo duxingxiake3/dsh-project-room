@@ -1130,6 +1130,10 @@ export class RoomStore {
       taskId: row.task_id ?? null,
       causalRootId: row.causal_root_id,
       clientMessageId: row.client_message_id,
+      // The request-level payload hash, kept so a retry of the same send request
+      // can be recognised as a duplicate even though `mentions` below holds the
+      // RESOLVED targets (the design notes).
+      payloadHash: row.payload_hash,
       createdAt: row.created_at,
       deliveries,
     };
@@ -1697,6 +1701,14 @@ export class RoomStore {
     if ('state' in patch) {
       sets.push('state = ?');
       values.push(patch.state);
+    }
+    if ('memberId' in patch) {
+      // Member creation records its intent before the member exists, so the
+      // dispatch row is where the resulting member id has to land: a retry reads
+      // it back and reuses that member instead of building a second one
+      // (the design notes, AT41).
+      sets.push('member_id = ?');
+      values.push(patch.memberId);
     }
     if ('detail' in patch) {
       sets.push('detail = ?');

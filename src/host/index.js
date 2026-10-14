@@ -25,8 +25,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { RoomError, isoTimestamp } from '../shared/contracts.js';
+import { RoomError, isoTimestamp } from '../../shared/contracts.js';
 import { createRelayMessage, HostAdapter } from './adapter/host-adapter.js';
 import { DecisionService } from './decisions/decision-service.js';
 import { DeliveryCoordinator } from './delivery/coordinator.js';
@@ -37,6 +40,7 @@ import { LoopGuard } from './room/loop-guard.js';
 import { MessageService } from './room/message-service.js';
 import { RoomService } from './room/room-service.js';
 import { RoomStore } from './storage/store.js';
+import { dataRoot } from './storage/paths.js';
 import { PlanningService } from './tasks/planning-service.js';
 import { TaskService } from './tasks/task-service.js';
 import { buildRoomTools } from './tools/room-tools.js';
@@ -49,24 +53,75 @@ import { WorkspaceCoordinator } from './workspace/coordinator.js';
 export const name = 'project-room';
 
 /**
- * Plugin configuration. Every key is optional: the defaults are the design's
- * proposed configuration, and a profile patch may override any of them.
- * @type {object}
+ * Plugin configuration.
+ *
+ * Every key is optional: the defaults below ARE the design's proposed
+ * configuration, and a profile patch may override any of them.
+ *
+ * The object is shaped as a Standard Schema, because that is what the loader
+ * reads (`runtime.Config['~standard'].validate(config)`). Declaring it this way
+ * keeps the plugin installable with zero runtime dependencies — no
+ * `@deepseek-ai/schemastery` import is needed, which is also why the plugin works
+ * on both the 0.1.7 and 0.2.x desktop runtimes.
  */
 export const Config = {
+  '~standard': {
+    version: 1,
+    vendor: 'dsh-project-room',
+    /**
+     * Normalize and validate plugin configuration.
+     * @param {unknown} value
+     * @returns {{ value: object } | { issues: Array<{ message: string, path?: string[] }> }}
+     */
+    validate(value) {
+      if (value === undefined || value === null) return { value: { ...DEFAULT_CONFIG } };
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        return { issues: [{ message: 'projectRoom 配置必须是一个对象。', path: [] }] };
+      }
+      const issues = [];
+      const merged = { ...DEFAULT_CONFIG, ...value };
+      const stringOrUndefined = (key) => {
+        if (merged[key] !== undefined && merged[key] !== null && typeof merged[key] !== 'string') {
+          issues.push({ message: `${key} 必须是字符串。`, path: [key] });
+        }
+      };
+      stringOrUndefined('dataDir');
+      stringOrUndefined('workspaceRoot');
+      if (typeof merged.maxAutomaticRounds !== 'number' || !Number.isFinite(merged.maxAutomaticRounds) || merged.maxAutomaticRounds <= 0) {
+        issues.push({ message: 'maxAutomaticRounds 必须是正数；0 或负数会让所有自动协作被立即暂停。', path: ['maxAutomaticRounds'] });
+      }
+      for (const key of ['httpRoute', 'autoCreateSessions', 'autoResume', 'publishFinalReplies']) {
+        if (merged[key] !== undefined && typeof merged[key] !== 'boolean') {
+          issues.push({ message: `${key} 必须是 true 或 false。`, path: [key] });
+        }
+      }
+      if (!Array.isArray(merged.restrictedToolDeny) || merged.restrictedToolDeny.some((name) => typeof name !== 'string')) {
+        issues.push({ message: 'restrictedToolDeny 必须是字符串数组。', path: ['restrictedToolDeny'] });
+      }
+      return issues.length > 0 ? { issues } : { value: merged };
+    },
+  },
+};
+
+/** The effective defaults, applied through {@link Config}. */
+export const DEFAULT_CONFIG = Object.freeze({
   /** Where room databases live; defaults to `<DSH_HOME>/storages/project-room`. */
   dataDir: undefined,
   /** Default working directory for member sessions (usually the project workspace). */
   workspaceRoot: undefined,
-  /** Tools a detail-only member must not receive. */
-  restrictedToolDeny: ['bash', 'pwsh', 'write', 'edit', 'str_replace_editor'],
+  /** Tools a detail-only member must not receive; intersected with what exists. */
+  restrictedToolDeny: ['bash', 'pwsh', 'shell', 'write', 'edit', 'str_replace_editor', 'apply_patch'],
   /** Automatic wake-ups allowed per causal chain before the guard pauses it. */
   maxAutomaticRounds: 12,
   /** Whether the HTTP route is registered (tests disable it). */
   httpRoute: true,
   /** Whether member sessions are created on room creation. */
   autoCreateSessions: true,
-};
+  /** Whether recovery runs on activation. */
+  autoResume: true,
+  /** Whether a room-driven turn's final answer is published back to the room. */
+  publishFinalReplies: true,
+});
 
 /**
  * Cordis `apply`.
@@ -75,7 +130,11 @@ export const Config = {
  */
 export async function apply(ctx, config = {}) {
   const logger = ctx.logger ?? console;
-  const options = { ...Config, ...config };
+  // The loader already validated and defaulted the config through `Config`, but
+  // `apply` is also called directly by tests and by the recovery path, so the
+  // defaults are applied once more here. Spreading `Config` itself would copy the
+  // schema marker, hence DEFAULT_CONFIG.
+  const options = { ...DEFAULT_CONFIG, ...config };
   const disposers = [];
 
   /* ------------------------------------------------------------------ *
@@ -250,9 +309,11 @@ export async function apply(ctx, config = {}) {
    * 5. Tools and route
    * ------------------------------------------------------------------ */
   const tools = buildRoomTools({ rooms, messages, models, tasks, planning, decisions, artifacts, memberOfSession });
+  const toolNames = [];
   if (ctx.tools?.register) {
     for (const definition of tools) {
       disposers.push(ctx.tools.register(definition));
+      toolNames.push(definition.name);
     }
     logger.info?.(`[project-room] registered ${tools.length} room tools`);
   } else {
@@ -310,7 +371,101 @@ export async function apply(ctx, config = {}) {
     }
   });
 
-  logger.info?.('[project-room] ready');
+  // One boot record: the exact runtime this activation resolved against, the
+  // tools it registered, and the capabilities it probed. Written into the
+  // plugin's own data directory so "which version is really running" is answered
+  // by evidence instead of by reading a path and assuming.
+  writeBootReport(
+    {
+      capabilities,
+      toolNames,
+      availableTools: safeToolNames(ctx),
+      memberToolRestrictions: [...adapter.toolRestrictions.entries()].map(([memberId, deny]) => ({ memberId, deny })),
+      rooms: store.listRooms().length,
+      dataRoot: dataRoot(),
+    },
+    logger,
+  );
+
+  logger.info?.(`[project-room] ready · core ${capabilities.dshVersion} (${capabilities.coreResolvedFrom ?? 'unresolved'})`);
+}
+
+/**
+ * Write the activation record next to the room database.
+ *
+ * Deliberately evidence-shaped: version, the exact file the framework version was
+ * read from, the tool names this activation registered, the global tool names the
+ * context exposed, and the capability flags. A compatibility claim should be
+ * checkable after the fact, not reconstructed from memory.
+ *
+ * @param {object} report
+ * @param {object} [logger]
+ */
+function writeBootReport(report, logger) {
+  try {
+    const target = join(dataRoot(), 'boot-report.json');
+    const previous = existsSync(target) ? JSON.parse(readFileSync(target, 'utf8')) : null;
+    const history = Array.isArray(previous?.history) ? previous.history.slice(-19) : [];
+    history.push({
+      at: isoTimestamp(),
+      dshVersion: report.capabilities.dshVersion,
+      coreResolvedFrom: report.capabilities.coreResolvedFrom,
+      nodeVersion: report.capabilities.nodeVersion,
+      electronVersion: report.capabilities.electronVersion,
+      toolCount: report.toolNames.length,
+      roomCount: report.rooms,
+    });
+    writeFileSync(
+      target,
+      JSON.stringify(
+        {
+          generatedAt: isoTimestamp(),
+          pluginVersion: pluginVersion(),
+          dshVersion: report.capabilities.dshVersion,
+          coreResolvedFrom: report.capabilities.coreResolvedFrom,
+          nodeVersion: report.capabilities.nodeVersion,
+          electronVersion: report.capabilities.electronVersion,
+          capabilities: report.capabilities,
+          registeredTools: report.toolNames,
+          availableTools: report.availableTools,
+          memberToolRestrictions: report.memberToolRestrictions,
+          roomCount: report.rooms,
+          dataRoot: report.dataRoot,
+          history,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  } catch (error) {
+    // A missing diagnostic file must never be the reason a project cannot run.
+    logger?.warn?.(`[project-room] boot report not written: ${error?.message ?? error}`);
+  }
+}
+
+/** This package's own version, read from its manifest. */
+function pluginVersion() {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf8'));
+    return manifest.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * The global tool names this context exposes, for the restriction check. Read
+ * defensively: a composition without a tool registry simply reports none.
+ * @param {object} ctx
+ * @returns {string[]}
+ */
+function safeToolNames(ctx) {
+  try {
+    return (ctx.tools?.schemas?.() ?? []).map((schema) => schema.name);
+  } catch {
+    return [];
+  }
 }
 
 /**

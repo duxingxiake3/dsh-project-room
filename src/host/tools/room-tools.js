@@ -85,7 +85,7 @@ export function buildRoomTools(services) {
         properties: {},
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(_args, exec) {
@@ -128,7 +128,7 @@ export function buildRoomTools(services) {
         },
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -184,7 +184,7 @@ export function buildRoomTools(services) {
         },
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -236,7 +236,7 @@ export function buildRoomTools(services) {
         required: ['topic'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -309,7 +309,7 @@ export function buildRoomTools(services) {
         required: ['tasks'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -340,7 +340,7 @@ export function buildRoomTools(services) {
         required: ['planId'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -373,7 +373,7 @@ export function buildRoomTools(services) {
         required: ['role'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -408,7 +408,7 @@ export function buildRoomTools(services) {
         required: ['taskId', 'memberId'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -450,7 +450,7 @@ export function buildRoomTools(services) {
         required: ['objective'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -496,7 +496,7 @@ export function buildRoomTools(services) {
         required: ['taskId'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -532,7 +532,7 @@ export function buildRoomTools(services) {
         },
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -576,7 +576,7 @@ export function buildRoomTools(services) {
         required: ['statement'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -613,7 +613,7 @@ export function buildRoomTools(services) {
         required: ['kind', 'location'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -649,7 +649,7 @@ export function buildRoomTools(services) {
         required: ['decisionId', 'state'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {
@@ -683,7 +683,7 @@ export function buildRoomTools(services) {
         required: ['taskId', 'passed'],
       },
       output: {
-        schema: { type: 'json' },
+        schema: { type: 'object' },
         render: (_args, value) => [{ type: 'text', text: renderJson(value) }],
       },
       async execute(args, exec) {

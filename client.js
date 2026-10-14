@@ -20,7 +20,10 @@
 
 window.__ModuleLoader__.load({
   id: 'dsh-project-room',
-  factory: (require) => {
+  // The factory is async because the shared rule modules arrive as package-local
+  // chunks through `require.async`: they are fetched only when this plugin
+  // activates, not at every page boot.
+  factory: async (require) => {
     const module = { exports: {} };
     const exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
@@ -28,8 +31,8 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
     const { useCallback, useEffect, useMemo, useRef, useState } = React;
-    const V = require('dsh-project-room#vocabulary');
-    const M = require('dsh-project-room#mention-resolver');
+    const V = await require.async('dsh-project-room#vocabulary');
+    const M = await require.async('dsh-project-room#mention-resolver');
 
     const {
       ROUTE,
