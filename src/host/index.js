@@ -176,6 +176,24 @@ export async function apply(ctx, config = {}) {
   const options = { ...DEFAULT_CONFIG, ...config };
   const disposers = [disposeHooks];
 
+  // What configuration actually arrived. Recorded because the AT39 trial established
+  // that member sessions need an agent preset to receive file and shell tools, and two
+  // attempts to supply one — a profile `config:` block on this row, then the plugin's
+  // own bundle patch — both left members holding the room tools only. Without this line
+  // there is no way to tell "the value never arrived" from "the value arrived and was
+  // ignored", and those two have opposite fixes.
+  trace('config.received', {
+    keys: Object.keys(config ?? {}),
+    memberAgentPreset: options.memberAgentPreset ?? null,
+    reminders: options.reminders !== false,
+  });
+  logger.info?.(
+    options.memberAgentPreset === undefined
+      ? '[project-room] memberAgentPreset is UNSET: member sessions mount no agent preset and will ' +
+          'receive coordination tools only (no file or shell tools).'
+      : `[project-room] member sessions will mount agent preset "${options.memberAgentPreset}"`,
+  );
+
   /* ------------------------------------------------------------------ *
    * 1. Storage
    * ------------------------------------------------------------------ */
