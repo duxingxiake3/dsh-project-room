@@ -521,7 +521,9 @@ export async function apply(ctx, config = {}) {
     electronVersion: capabilities.electronVersion,
     capabilities,
     registeredTools: toolNames,
-    availableTools: safeToolNames(ctx),
+    // Named for what it measures. The old key was `availableTools`, which claimed to
+    // describe the host while only ever describing this plugin's own scope.
+    pluginScopedTools: pluginScopedToolNames(ctx),
     memberToolRestrictions: [...adapter.toolRestrictions.entries()].map(([memberId, deny]) => ({ memberId, deny })),
     rooms: store.listRooms().length,
     dataRoot: dataRoot(),
@@ -542,12 +544,19 @@ function pluginVersion() {
 }
 
 /**
- * The global tool names this context exposes, for the restriction check. Read
- * defensively: a composition without a tool registry simply reports none.
+ * The tool names registered in THIS plugin's own scope, for the restriction check.
+ * Read defensively: a composition without a tool registry simply reports none.
+ *
+ * Scope matters and was previously mislabelled. `ctx.tools.schemas()` answers for the
+ * calling context only, so on the desktop profile it returned the 15 room tools and
+ * nothing else — `write`, `edit` and `pwsh` were absent even though the host supplies
+ * them. Reported as `availableTools`, that read as "this host has no file tools", and
+ * a room member treated it as evidence of its own incapacity. It is a useful number
+ * for auditing which room tools mounted; it is not an inventory of the host.
  * @param {object} ctx
  * @returns {string[]}
  */
-function safeToolNames(ctx) {
+function pluginScopedToolNames(ctx) {
   try {
     return (ctx.tools?.schemas?.() ?? []).map((schema) => schema.name);
   } catch {
