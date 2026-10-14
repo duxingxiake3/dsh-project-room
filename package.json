@@ -34,10 +34,13 @@
     "development checkpoint"
   ],
   "scripts": {
-    "build": "node scripts/build-client.mjs",
-    "test": "node --test \"tests/unit/*.test.js\" \"tests/integration/*.test.js\"",
-    "check": "node scripts/build-client.mjs --check && node scripts/check-syntax.mjs",
-    "harness": "node scripts/run-client-harness.mjs"
+    "build": "node --experimental-vm-modules scripts/build-client.mjs",
+    "test": "node --experimental-vm-modules --experimental-test-isolation=none --test \"tests/unit/*.test.js\" \"tests/integration/*.test.js\"",
+    "check": "node --experimental-vm-modules scripts/build-client.mjs --check && node --experimental-vm-modules scripts/check-syntax.mjs",
+    "harness": "node scripts/run-client-harness.mjs",
+    "pack": "npm pack",
+    "verify:package": "node --experimental-vm-modules scripts/verify-package.mjs",
+    "pack:verify": "npm pack && node --experimental-vm-modules scripts/verify-package.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": "*",

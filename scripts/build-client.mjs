@@ -24,7 +24,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLIENT = join(ROOT, 'client.js');
 const BEGIN = '/* >>> GENERATED: shared rules (scripts/build-client.mjs) >>> */';
@@ -120,21 +119,47 @@ function generate() {
   return parts.join('\n');
 }
 
-const client = readFileSync(CLIENT, 'utf8');
-const begin = client.indexOf(BEGIN);
-const end = client.indexOf(END);
-if (begin < 0 || end < 0 || end < begin) {
-  throw new Error(`client.js is missing the generated markers:\n  ${BEGIN}\n  ${END}`);
+/**
+ * Compares the on-disk generated section with what `generate()` would write.
+ *
+ * Exported so the activation-contract test can assert staleness in-process. The
+ * earlier version of that test spawned `node scripts/build-client.mjs --check`,
+ * which the DSH Windows file sandbox denies with `EPERM` (no named pipes) — the
+ * test then failed for a reason that had nothing to do with the plugin.
+ *
+ * @returns {{ stale: boolean, current: string, next: string }}
+ */
+export function checkGenerated({ client = CLIENT } = {}) {
+  const source = readFileSync(client, 'utf8');
+  const begin = source.indexOf(BEGIN);
+  const end = source.indexOf(END);
+  if (begin < 0 || end < 0 || end < begin) {
+    throw new Error(`client.js is missing the generated markers:\n  ${BEGIN}\n  ${END}`);
+  }
+  const body = generate();
+  const next = source.slice(0, begin) + body + source.slice(end + END.length);
+  return { stale: next !== source, current: source, next };
 }
 
-const next = client.slice(0, begin) + generate() + client.slice(end + END.length);
-if (next === client) {
-  process.stdout.write('· client.js shared section is up to date\n');
-  process.exit(0);
+/**
+ * CLI entry. When this file is imported (the test does) nothing below runs.
+ * @returns {void}
+ */
+function main() {
+  const { stale } = checkGenerated();
+  if (!stale) {
+    process.stdout.write('· client.js shared section is up to date\n');
+    return;
+  }
+  if (process.argv.includes('--check')) {
+    process.stderr.write('✖ client.js shared section is stale; run `node scripts/build-client.mjs`\n');
+    process.exit(1);
+  }
+  writeFileSync(CLIENT, checkGenerated().next, 'utf8');
+  process.stdout.write('✔ client.js shared section regenerated\n');
 }
-if (process.argv.includes('--check')) {
-  process.stderr.write('✖ client.js shared section is stale; run `node scripts/build-client.mjs`\n');
-  process.exit(1);
-}
-writeFileSync(CLIENT, next, 'utf8');
-process.stdout.write('✔ client.js shared section regenerated\n');
+
+const invokedDirectly =
+  process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (invokedDirectly) main();
+

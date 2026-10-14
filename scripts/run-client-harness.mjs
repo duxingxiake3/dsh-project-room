@@ -13,11 +13,12 @@
  * Exit code is 0 only when every check in the harness passed.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { capture } from '../src/host/process.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const HARNESS = join(ROOT, 'client-harness.html');
@@ -54,7 +55,7 @@ const logFile = join(profile, 'console.log');
 process.stdout.write(`browser : ${browser}\n`);
 process.stdout.write(`harness : ${HARNESS}\n`);
 
-const run = spawnSync(
+const run = capture(
   browser,
   [
     '--headless=new',
@@ -68,10 +69,10 @@ const run = spawnSync(
     '--dump-dom',
     pathToFileURL(HARNESS).href,
   ],
-  { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
+  { timeoutMs: 120000, maxBuffer: 32 * 1024 * 1024 },
 );
 
-const output = `${run.stdout ?? ''}\n${run.stderr ?? ''}`;
+const output = `${run.stdout}\n${run.stderr}`;
 
 // The harness prints one line per check; the browser tags console output with
 // `INFO:CONSOLE`, so match on the harness prefix and strip the wrapper.

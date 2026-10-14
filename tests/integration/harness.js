@@ -34,6 +34,7 @@ import { DeliveryCoordinator } from '../../src/host/delivery/coordinator.js';
 import { TurnObserver, extractText } from '../../src/host/delivery/turn-observer.js';
 import { ModelProfileService } from '../../src/host/models/model-service.js';
 import { RecoveryService } from '../../src/host/recovery/recovery-service.js';
+import { ReminderService } from '../../src/host/reminders/reminder-service.js';
 import { ContextBuilder } from '../../src/host/room/context-builder.js';
 import { LoopGuard } from '../../src/host/room/loop-guard.js';
 import { MessageService } from '../../src/host/room/message-service.js';
@@ -612,6 +613,9 @@ export function createRoomStack(options = {}) {
   // specific input entered a turn, and what publishes a member's final reply.
   observer.attachHost(host.ctx);
   const recovery = new RecoveryService({ store, rooms, adapter, delivery, observer, planning, decisions, models, logger });
+  // Constructed but never started: tests drive `scan()` explicitly so the
+  // invalidation rules are asserted against a clock they control, not a timer.
+  const reminders = new ReminderService({ store, rooms, messages, logger });
 
   return {
     host,
@@ -633,6 +637,7 @@ export function createRoomStack(options = {}) {
     decisions,
     observer,
     recovery,
+    reminders,
     ensureMemberSession,
     memberOfSession,
     sessionIndex,

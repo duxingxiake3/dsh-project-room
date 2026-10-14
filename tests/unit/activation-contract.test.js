@@ -24,7 +24,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, it } from 'node:test';
-import { spawnSync } from 'node:child_process';
+import { checkGenerated } from '../../scripts/build-client.mjs';
+import { checkSyntax } from '../../scripts/check-syntax.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -115,23 +116,23 @@ describe('activation contract — client half stays one classic script', () => {
   });
 
   it('has an up-to-date generated section', () => {
-    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'build-client.mjs'), '--check'], { encoding: 'utf8' });
-    assert.equal(
-      result.status,
-      0,
-      `client.js shared section is stale — run \`node scripts/build-client.mjs\`. Output: ${result.stdout}${result.stderr}`,
-    );
+    const { stale } = checkGenerated();
+    assert.equal(stale, false, 'client.js shared section is stale — run `node scripts/build-client.mjs`');
   });
 
   it('parses as a classic script', () => {
-    const result = spawnSync(process.execPath, ['--check', join(ROOT, 'client.js')], { encoding: 'utf8' });
-    assert.equal(result.status, 0, `client.js does not parse: ${result.stderr}`);
+    // `client.js` is a browser classic script that also happens to be valid ESM,
+    // so the in-process ESM parser is a faithful syntax gate for it.
+    const target = join(ROOT, 'client.js');
+    const failures = checkSyntax().failures.filter((entry) => entry.startsWith(target));
+    assert.deepEqual(failures, [], `client.js does not parse: ${failures.join('; ')}`);
   });
 });
 
 describe('activation contract — the package stays install-free', () => {
   it('imports no @deepseek-ai package anywhere in the plugin', () => {
-    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'check-syntax.mjs')], { encoding: 'utf8' });
-    assert.equal(result.status, 0, `a host package import would break installation: ${result.stdout}${result.stderr}`);
+    const { failures, available } = checkSyntax();
+    assert.ok(available, 'vm.SourceTextModule must be available; run node with --experimental-vm-modules');
+    assert.deepEqual(failures, [], 'a host package import would break installation');
   });
 });

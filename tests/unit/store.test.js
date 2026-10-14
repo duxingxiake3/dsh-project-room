@@ -9,7 +9,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { after, before, describe, it } from 'node:test';
 
 import { RoomError, isoTimestamp } from '../../shared/contracts.js';
-import { RoomStore, payloadHash, temporaryDatabasePath } from '../../src/host/storage/store.js';
+import { RoomStore, SCHEMA_VERSION, payloadHash, temporaryDatabasePath } from '../../src/host/storage/store.js';
 
 /** @type {RoomStore} */
 let store;
@@ -329,7 +329,7 @@ describe('store — single writer', () => {
     writeFileSync(lock, '999999|2020-01-01T00:00:00.000Z', 'utf8');
     const recovered = new RoomStore({ file: stale, lockFile: lock });
     recovered.open();
-    assert.equal(recovered.getMeta('schemaVersion'), '1');
+    assert.equal(recovered.getMeta('schemaVersion'), String(SCHEMA_VERSION));
     assert.match(readFileSync(lock, 'utf8'), new RegExp(`^${process.pid}\\|`));
     recovered.close();
     assert.equal(existsSync(lock), false, 'closing must release our own lock');

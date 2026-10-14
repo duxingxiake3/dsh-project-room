@@ -16,11 +16,11 @@
  * @module dsh-project-room/src/host/workspace/coordinator
  */
 
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { RoomError, isoTimestamp } from '../../../shared/contracts.js';
+import { git } from './git.js';
 
 export class WorkspaceCoordinator {
   /**
@@ -334,7 +334,7 @@ export class WorkspaceCoordinator {
   }
 
   #git(cwd, args) {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return git(cwd, args);
   }
 
   /** Remove a worktree only when its changes were integrated. */

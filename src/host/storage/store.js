@@ -35,7 +35,7 @@ import { RoomError, canTransition, isoTimestamp } from '../../../shared/contract
 import { backupDir, databasePath, ensureDir, lockPath } from './paths.js';
 
 /** Bump when the schema changes; migrations below must handle every older value. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 create table if not exists meta (
@@ -294,6 +294,8 @@ create table if not exists reminder (
   dedupe_key text not null,
   state      text not null,
   created_at text not null,
+  fired_at   text,
+  reason     text,
   unique (room_id, dedupe_key)
 );
 
@@ -374,7 +376,28 @@ export class RoomStore {
     this.singleWriter = options.singleWriter !== false;
     this.logger = options.logger ?? null;
     this.db = null;
-    this.migrations = [];
+    this.migrations = [
+      {
+        // v1 → v2: the reminder table gained the outcome of a reminder, so a
+        // fired one and an expired one are distinguishable after the fact
+        // (the design notes). Columns are added only when absent: a database created
+        // by this build already has them from SCHEMA above, and a database that
+        // stopped halfway through an earlier migration must still be repairable.
+        from: 1,
+        run: (db) => {
+          for (const [column, type] of [
+            ['fired_at', 'text'],
+            ['reason', 'text'],
+          ]) {
+            const present = db
+              .prepare('select name from pragma_table_info(?)')
+              .all('reminder')
+              .some((entry) => entry.name === column);
+            if (!present) db.exec(`alter table reminder add column ${column} ${type}`);
+          }
+        },
+      },
+    ];
     this.closed = false;
 
     ensureDir(this.file.replace(/[\\/][^\\/]+$/, ''));
@@ -1780,6 +1803,51 @@ export class RoomStore {
         isoTimestamp(),
       );
   }
+  /**
+   * Take the pending reminders whose deadline has passed, across every room.
+   *
+   * One query rather than one per room: the scanner runs on a timer, and a room
+   * that has never had a blocker must not cost a query on every tick.
+   *
+   * @param {string} now ISO timestamp; reminders due at or before this are claimable
+   * @param {number} [limit]
+   * @returns {object[]}
+   */
+  dueReminders(now, limit = 50) {
+    return this.#db()
+      .prepare(
+        `select * from reminder
+          where state = 'pending' and due_at <= ?
+          order by due_at asc
+          limit ?`,
+      )
+      .all(now, limit)
+      .map(mapReminder);
+  }
+
+  /**
+   * Mark a reminder spent, recording what happened to it.
+   *
+   * The reason is stored rather than only time-stamped because "fired" and
+   * "expired because the task was finished" are different facts, and an operator
+   * reading the board later needs to tell them apart (the design notes).
+   *
+   * @param {string} reminderId
+   * @param {'fired' | 'expired'} state
+   * @param {string} [reason]
+   * @returns {boolean} whether a pending row was actually transitioned
+   */
+  settleReminder(reminderId, state, reason) {
+    const result = this.#db()
+      .prepare(
+        `update reminder set state = ?, fired_at = ?, reason = ?
+          where id = ? and state = 'pending'`,
+      )
+      .run(state, isoTimestamp(), reason ?? null, reminderId);
+    // A zero-row update means another tick (or another process sharing the file)
+    // already settled it. Reporting that is what keeps the scan idempotent.
+    return result.changes > 0;
+  }
 
   /**
    * @param {string} roomId
@@ -1800,16 +1868,7 @@ export class RoomStore {
     return this.#db()
       .prepare(`select * from reminder where ${clauses.join(' and ')} order by due_at asc`)
       .all(...values)
-      .map((row) => ({
-        id: row.id,
-        roomId: row.room_id,
-        taskId: row.task_id ?? null,
-        targetId: row.target_id,
-        dueAt: row.due_at,
-        dedupeKey: row.dedupe_key,
-        state: row.state,
-        createdAt: row.created_at,
-      }));
+      .map(mapReminder);
   }
 
   /** @param {string} roomId @param {string} kind @param {string} body */
@@ -1858,6 +1917,28 @@ function mapRoom(row) {
     config: parseJson(row.config, {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A reminder row.
+ *
+ * `reason` and `firedAt` are read defensively (`?? null`): they were added after
+ * the first databases existed, and a room created by an earlier build must still
+ * load rather than throw on a missing column.
+ */
+function mapReminder(row) {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    taskId: row.task_id ?? null,
+    targetId: row.target_id,
+    dueAt: row.due_at,
+    dedupeKey: row.dedupe_key,
+    state: row.state,
+    createdAt: row.created_at,
+    firedAt: row.fired_at ?? null,
+    reason: row.reason ?? null,
   };
 }
 

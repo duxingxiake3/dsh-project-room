@@ -8,13 +8,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { before, describe, it } from 'node:test';
 
 import { RoomError } from '../../shared/contracts.js';
+import { capture } from '../../src/host/process.js';
 import { splitChanges } from '../../src/host/workspace/coordinator.js';
 import { createRoomStack, createStandardRoom, useTemporaryDataDir } from './harness.js';
 
@@ -30,7 +30,11 @@ before(() => {
 
 /** Run git in one directory, failing the test on a non-zero exit. */
 function git(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = capture('git', args, { cwd });
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed in ${cwd}: ${result.stderr || result.error?.message}`);
+  }
+  return result.stdout;
 }
 
 /**

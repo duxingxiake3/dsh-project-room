@@ -91,6 +91,7 @@ export class HostAdapter {
    * @param {object} input
    * @param {import('@deepseek-ai/cordis').Context} input.ctx  Plugin context; owns every agent it creates.
    * @param {object} [input.logger]
+   * @param {(invocation: object) => void} [input.onUsage]  Sink for real token usage per member call.
    */
   constructor(input) {
     this.ctx = input.ctx;
@@ -104,6 +105,12 @@ export class HostAdapter {
     this.routes = new Map();
     /** Tool names actually removed per member, so the UI can state the real surface. */
     this.toolRestrictions = new Map();
+    /**
+     * Where real token counts go. Injected rather than reached for, so the adapter
+     * keeps owning no storage (the design notes: the store belongs to the services).
+     * @type {((invocation: object) => void) | null}
+     */
+    this.onUsage = input.onUsage ?? null;
     this.disposed = false;
   }
 
@@ -339,6 +346,21 @@ export class HostAdapter {
           return { ...proposed, provider: current.providerRoute, model: current.modelId };
         });
 
+        // 1b. What the member's calls actually cost. `llm/stream` is the only place
+        //     real token counts exist (`StreamChunk` of type `usage`), and it is
+        //     registered per member session so one room's usage can never be
+        //     attributed to another's (the design notes "用量费用：记录实际用量").
+        agentCtx.on('llm/stream', (options, next) =>
+          adapter.#observeUsage({
+            memberId: input.memberId,
+            roomId: input.roomId,
+            sessionId,
+            selection,
+            options,
+            next,
+          }),
+        );
+
         // 2. Identity + duties, as an agent-scoped prompt section so a resume
         //    restores them and a disposal removes them.
         if (input.personaInstructions) {
@@ -392,6 +414,18 @@ export class HostAdapter {
           adapter.recordRoute(input.memberId, input.roomId, input.sessionId, current, payload);
           return { ...proposed, provider: current.providerRoute, model: current.modelId };
         });
+        // A resumed session spends tokens too; usage must not stop being recorded
+        // just because the member's session outlived one plugin activation.
+        agentCtx.on('llm/stream', (options, next) =>
+          adapter.#observeUsage({
+            memberId: input.memberId,
+            roomId: input.roomId,
+            sessionId: input.sessionId,
+            selection,
+            options,
+            next,
+          }),
+        );
         if (input.personaInstructions) {
           agentCtx.systemPrompt.section({
             name: `project-room-persona-${input.memberId}`,
@@ -599,6 +633,56 @@ export class HostAdapter {
     return [...this.routes.values()];
   }
 
+  /**
+   * Wrap one member's model call so its real token usage is recorded (the design notes).
+   *
+   * Three deliberate choices:
+   *
+   *   - **The route is read from `selection.current`, not from `options`.** The
+   *     `agent/request` listener replaces the provider and model with this member's
+   *     route, so `options` at this point still carries the host's default. Trusting
+   *     it would attribute every member's tokens to the wrong model.
+   *   - **The stream is passed through untouched.** This wraps an async iterable the
+   *     agent loop is already consuming; swallowing or reordering chunks would
+   *     corrupt the conversation to record a statistic.
+   *   - **The write is idempotent per `(member, turn, step)`.** A retried request
+   *     updates its own row instead of adding a second one, so the usage total
+   *     counts calls rather than attempts.
+   *
+   * @param {object} input
+   * @param {string} input.memberId
+   * @param {string} input.roomId
+   * @param {string} input.sessionId
+   * @param {{ current: { providerRoute: string, modelId: string } | null }} input.selection
+   * @param {{ provider?: string, model?: string, sessionId?: string }} input.options
+   * @param {() => AsyncIterable<object>} input.next
+   * @returns {AsyncIterable<object>}
+   */
+  async *#observeUsage(input) {
+    const stream = await input.next();
+    const route = input.selection.current;
+    let usage = null;
+    for await (const chunk of stream) {
+      if (chunk?.type === 'usage' && chunk.usage) usage = chunk.usage;
+      yield chunk;
+    }
+    // Recorded after the stream ends so the counts are the call's final ones, and
+    // only when the provider actually reported them: an invented zero would read
+    // as "this call was free" rather than "this is unknown".
+    if (!usage || !route) return;
+    const ref = this.routes.get(input.memberId);
+    this.onUsage?.({
+      memberId: input.memberId,
+      roomId: input.roomId,
+      sessionId: input.sessionId,
+      providerRoute: route.providerRoute,
+      modelId: route.modelId,
+      turn: ref?.turn ?? null,
+      step: ref?.step ?? null,
+      usage,
+    });
+  }
+
   /** The live agent for a member, when this plugin owns one. */
   agentOf(memberId) {
     return this.members.get(memberId)?.handle?.agent ?? null;
@@ -698,17 +782,34 @@ export function readDshVersion() {
       // Try the next candidate: an install may ship one package and not another.
     }
   }
-  // The plugin is linked outside the profile, so its own resolution walk may
-  // legitimately fail; the profile root is the last honest place to look.
-  try {
+
+  // Fallbacks, in the order they are actually likely to work.
+  //
+  // The plugin is normally linked OUTSIDE the profile, so its own resolution walk
+  // cannot see the framework, and the profile's own `node_modules` on this machine
+  // contains only the two linked plugins — no `@deepseek-ai` directory at all. So a
+  // profile-only fallback returned `unknown` in precisely the case that needed a
+  // fallback.
+  //
+  // What is NOT done here: guessing a path under `<app>/resources/app.asar`. That
+  // was tried and removed, because it cannot work and cannot be tested — asar is not
+  // a directory to plain Node (`readFileSync('…/app.asar/dsh/…')` is `ENOENT`;
+  // traversal needs Electron's patched `fs`), and this machine's environment exports
+  // no app-root variable to build the path from. The honest position is that the
+  // primary walk above is what resolved `0.2.0-rc.2` in the real desktop host
+  // (`boot-report.json` → `coreResolvedFrom`), and that when it fails the plugin
+  // reports `unknown` and marks compatibility unverified rather than guessing.
+  const fromProfile = () => {
     const profileDir = process.env.DSH_PROFILE_DIR;
-    if (profileDir) {
-      const manifest = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json');
+    if (!profileDir) return null;
+    const manifest = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json');
+    try {
       const parsed = JSON.parse(readFileSync(manifest, 'utf8'));
       return { version: parsed.version ?? 'unknown', resolvedFrom: manifest };
+    } catch {
+      return null;
     }
-  } catch {
-    // fall through to the honest unknown
-  }
-  return { version: 'unknown', resolvedFrom: null };
+  };
+
+  return fromProfile() ?? { version: 'unknown', resolvedFrom: null };
 }

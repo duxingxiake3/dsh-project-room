@@ -24,7 +24,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +47,9 @@ import { buildRoomTools } from './tools/room-tools.js';
 import { ArtifactService } from './workspace/artifact-service.js';
 import { registerRoomRoute } from './api/route.js';
 import { RecoveryService } from './recovery/recovery-service.js';
+import { ReminderService } from './reminders/reminder-service.js';
 import { WorkspaceCoordinator } from './workspace/coordinator.js';
+import { gitVersion } from './workspace/git.js';
 
 /** Cordis plugin name. */
 export const name = 'project-room';
@@ -109,7 +110,7 @@ export const Config = {
       if (typeof merged.maxAutomaticRounds !== 'number' || !Number.isFinite(merged.maxAutomaticRounds) || merged.maxAutomaticRounds <= 0) {
         issues.push({ message: 'maxAutomaticRounds 必须是正数；0 或负数会让所有自动协作被立即暂停。', path: ['maxAutomaticRounds'] });
       }
-      for (const key of ['httpRoute', 'autoCreateSessions', 'autoResume', 'publishFinalReplies']) {
+      for (const key of ['httpRoute', 'autoCreateSessions', 'autoResume', 'publishFinalReplies', 'reminders']) {
         if (merged[key] !== undefined && typeof merged[key] !== 'boolean') {
           issues.push({ message: `${key} 必须是 true 或 false。`, path: [key] });
         }
@@ -140,6 +141,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   autoResume: true,
   /** Whether a room-driven turn's final answer is published back to the room. */
   publishFinalReplies: true,
+  /** Whether due reminders are swept and invalidated (the design notes). */
+  reminders: true,
 });
 
 /**
@@ -177,7 +180,34 @@ export async function apply(ctx, config = {}) {
   /* ------------------------------------------------------------------ *
    * 2. Host adapter
    * ------------------------------------------------------------------ */
-  const adapter = new HostAdapter({ ctx, logger });
+  const adapter = new HostAdapter({
+    ctx,
+    logger,
+    // Real token usage from the member's own stream (the design notes). Wrapped so a
+    // storage failure can never break a model call that already succeeded.
+    onUsage: (invocation) => {
+      try {
+        store.recordInvocation({
+          id: `inv_${invocation.memberId}_t${invocation.turn ?? 0}s${invocation.step ?? 0}`,
+          roomId: invocation.roomId,
+          memberId: invocation.memberId,
+          sessionId: invocation.sessionId,
+          hostRequestRef: `${invocation.providerRoute}/${invocation.modelId}`,
+          modelConfigRevision: store.getMember(invocation.memberId)?.modelConfigRevision ?? 0,
+          providerRoute: invocation.providerRoute,
+          modelId: invocation.modelId,
+          usage: invocation.usage,
+        });
+        trace('usage.recorded', {
+          memberId: invocation.memberId,
+          model: `${invocation.providerRoute}/${invocation.modelId}`,
+          usage: invocation.usage,
+        });
+      } catch (error) {
+        traceError('usage.record', error);
+      }
+    },
+  });
   const capabilities = adapter.capabilities();
   trace('capabilities.probed', {
     dshVersion: capabilities.dshVersion,
@@ -229,6 +259,9 @@ export async function apply(ctx, config = {}) {
     logger,
   });
   const recovery = new RecoveryService({ store, rooms, adapter, delivery, observer, planning, decisions, models, logger });
+  // Reminders are constructed before recovery so that a recovery pass which
+  // re-blocks a task can be chased in the same activation, not one restart later.
+  const reminders = new ReminderService({ store, rooms, messages, logger });
 
   /**
    * sessionId → memberId. The server-side identity map that makes every tool call
@@ -424,6 +457,29 @@ export async function apply(ctx, config = {}) {
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * 7. Reminders
+   * ------------------------------------------------------------------ */
+  // Started after recovery: recovery may settle tasks, and firing a reminder for
+  // a task that recovery just finished would be exactly the noise §11.4 forbids.
+  if (options.reminders !== false) {
+    const stopReminders = reminders.start();
+    disposers.push(stopReminders);
+    trace('reminders.started', { intervalMs: reminders.intervalMs });
+    try {
+      const pass = await reminders.scan();
+      trace('reminders.scan', pass);
+      if (pass.fired > 0 || pass.expired > 0) {
+        logger.info?.(`[project-room] reminders: fired ${pass.fired}, expired ${pass.expired}`);
+      }
+    } catch (error) {
+      // A failed sweep must not stop the plugin: the next tick retries, and the
+      // rooms remain fully usable without reminders.
+      traceError('reminders.scan', error);
+      logger.warn?.(`[project-room] reminder sweep failed: ${error?.message ?? error}`);
+    }
+  }
+
   ctx.effect(() => () => {
     // Reverse order, and never throw out of teardown.
     for (const dispose of disposers.splice(0).reverse()) {
@@ -501,11 +557,7 @@ function shouldRestrictTools(role) {
  * @returns {string | null} the version string, or null when unavailable
  */
 function probeGit() {
-  try {
-    return String(execFileSync('git', ['--version'], { encoding: 'utf8' })).trim();
-  } catch {
-    return null;
-  }
+  return gitVersion();
 }
 
 /**

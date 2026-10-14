@@ -1246,4 +1246,24 @@ describe('project room — composition root', () => {
     assert.equal(typeof host.routes[0].handler, 'function');
     assert.deepEqual(host.logs.error, []);
   });
+
+  it('turns the reminder sweep on by default, and can be told to leave it off', async (t) => {
+    const dataDir = useTemporaryDataDir('apply-reminders');
+    const host = createFakeHost();
+    t.after(() => host.disposeAll());
+
+    const plugin = await import('../../src/host/index.js');
+    // Default: on. A room with a blocked task must not silently lose its follow-up.
+    const defaults = plugin.Config['~standard'].validate({}).value;
+    assert.equal(defaults.reminders, true);
+
+    // A non-boolean is reported rather than coerced, like the other switches.
+    assert.ok(Array.isArray(plugin.Config['~standard'].validate({ reminders: 'yes' }).issues));
+
+    // Activation with the sweep disabled must still complete cleanly: the service
+    // is constructed on that path too, so a wiring mistake would surface here.
+    await apply(host.ctx, { dataDir, httpRoute: false, reminders: false });
+    assert.equal(host.tools.length, 15, '工具注册不受提醒开关影响');
+    assert.deepEqual(host.logs.error, []);
+  });
 });

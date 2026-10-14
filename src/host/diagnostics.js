@@ -126,13 +126,18 @@ export function writeReport(report) {
     const target = reportPath();
     const previous = existsSync(target) ? JSON.parse(readFileSync(target, 'utf8')) : null;
     const history = Array.isArray(previous?.history) ? previous.history.slice(-19) : [];
+    // The caller passes `registeredTools`; reading a `toolNames` key here made
+    // every history entry claim 0 tools while the report body listed all of them.
+    // The two fields are now named once, so the summary cannot disagree with the
+    // record it summarizes.
+    const toolCount = (report.registeredTools ?? report.toolNames ?? []).length;
     history.push({
       at: new Date().toISOString(),
       activation: state.activationId,
       pid: process.pid,
       dshVersion: report.dshVersion,
       coreResolvedFrom: report.coreResolvedFrom,
-      toolCount: report.toolNames?.length ?? 0,
+      toolCount,
       roomCount: report.rooms ?? 0,
       elapsedMs: Date.now() - state.startedAt,
     });
@@ -141,7 +146,7 @@ export function writeReport(report) {
       JSON.stringify({ generatedAt: new Date().toISOString(), pluginVersion: report.pluginVersion, phases: state.lines, ...report, history }, null, 2),
       'utf8',
     );
-    trace('activation.report-written', { tools: report.toolNames?.length ?? 0, rooms: report.rooms ?? 0 });
+    trace('activation.report-written', { tools: toolCount, rooms: report.rooms ?? 0 });
   } catch (error) {
     traceError('activation.report', error);
   }
