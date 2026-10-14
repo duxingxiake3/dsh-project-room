@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+     role="img" aria-label="Project Room">
+  <title>Project Room</title>
+  <!-- The room: a group bubble with its tail, so the mark reads as "one project, one chat". -->
+  <path d="M4 5.75h16v10.5H8.75L4 19.5z" />
+  <!-- The members: two heads and a shared line, not a single speaker. -->
+  <circle cx="9.25" cy="9.75" r="1.5" />
+  <path d="M6.75 13.25c.55-1.1 1.45-1.65 2.5-1.65s1.95.55 2.5 1.65" />
+  <path d="M14 9.5h3.25M14 12.25h2" />
+</svg>
