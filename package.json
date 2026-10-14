@@ -23,6 +23,7 @@
   "files": [
     "host.js",
     "client.js",
+    "client-harness.html",
     "src/",
     "shared/",
     "assets/",
@@ -34,7 +35,8 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "test": "node --test \"tests/unit/*.test.js\" \"tests/integration/*.test.js\"",
-    "check": "node scripts/build-client.mjs --check && node scripts/check-syntax.mjs"
+    "check": "node scripts/build-client.mjs --check && node scripts/check-syntax.mjs",
+    "harness": "node scripts/run-client-harness.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-agent": "*",

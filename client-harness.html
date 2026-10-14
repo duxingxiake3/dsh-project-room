@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Project Room — client-half browser harness</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #eee; font: 13px/1.7 system-ui, "Segoe UI", sans-serif; }
+  #log { padding: 14px; white-space: pre-wrap; }
+  .ok { color: #6f6; }
+  .bad { color: #f77; }
+  .muted { color: #999; }
+  .head { color: #8cf; font-weight: 600; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<script>
+/**
+ * Browser harness for the Project Room client half.
+ *
+ * WHY THIS EXISTS: the client half is a classic script loaded into the DSH web
+ * shell. It cannot be exercised by `node --test` (no DOM, no module table) and it
+ * cannot be exercised by the framework sandbox (which boots the host half only).
+ * Three real failures shipped without it — a closed-table chunk request, a
+ * metadata ENOENT, and a stale bundle — and each one cost a desktop restart to
+ * discover. This page reproduces the shell's exact contract so a client-side
+ * failure is caught here instead.
+ *
+ * WHAT IT REPRODUCES (and nothing more):
+ *   - `window.__ModuleLoader__` with the queue-then-live facade;
+ *   - a module table seeded with ONLY `react` and `react/jsx-runtime`, so any
+ *     other `require` fails the way the real bundle purity gate fails;
+ *   - the browser's own script loading, error events and console.
+ *
+ * WHAT IT DOES NOT REPRODUCE: real React, the real component library, real
+ * styles, real user interaction. A pass here means "the module registers,
+ * materializes, and its apply() wires the right slots" — not "the panel looks
+ * right". That distinction is stated in notes/host notes
+ *
+ * HOW TO RUN (writes results to stdout, which the caller greps):
+ *
+ *   chrome --headless=new --disable-gpu --no-sandbox --enable-logging=stderr \
+ *          --virtual-time-budget=8000 --dump-dom client-harness.html
+ *
+ * The page also prints `HARNESS-RESULT: PASS|FAIL` to the console and into the
+ * DOM, so both `--dump-dom` and stderr logging can be used to read the verdict.
+ */
+(function () {
+  'use strict';
+
+  var log = document.getElementById('log');
+  var failures = 0;
+  var checks = 0;
+
+  function line(text, cls) {
+    var div = document.createElement('div');
+    if (cls) div.className = cls;
+    div.textContent = text;
+    log.appendChild(div);
+    console.log('[harness] ' + text);
+  }
+  function head(text) { line(text, 'head'); }
+  function ok(text) { checks += 1; line('PASS  ' + text, 'ok'); }
+  function bad(text) { checks += 1; failures += 1; line('FAIL  ' + text, 'bad'); }
+  function info(text) { line('      ' + text, 'muted'); }
+
+  window.addEventListener('error', function (event) {
+    bad('window.onerror: ' + (event.message || '') + ' @ ' + (event.filename || '') + ':' + (event.lineno || 0));
+  });
+  window.addEventListener('unhandledrejection', function (event) {
+    bad('unhandledrejection: ' + (event.reason && event.reason.message ? event.reason.message : String(event.reason)));
+  });
+
+  /* ---- 1. the loader facade the shell installs before any bundle runs ---- */
+  var registrations = [];
+  window.__ModuleLoader__ = {
+    mode: 'queue',
+    pendingQueue: registrations,
+    load: function (registration) {
+      registrations.push(registration);
+      console.log('[harness] registered module: ' + registration.id + (registration.chunk ? ' (chunk ' + registration.chunk + ')' : ''));
+    },
+    create: function () { throw new Error('the harness does not need the module system'); }
+  };
+
+  /* ---- 2. the closed module table, seeded exactly as the shell seeds it ---- */
+  var requested = [];
+  var jsx = function () { return null; };
+  var moduleTable = {
+    react: {
+      createElement: jsx, Fragment: 'Fragment',
+      useState: function (initial) { return [typeof initial === 'function' ? initial() : initial, function () {}]; },
+      useEffect: function () {}, useLayoutEffect: function () {},
+      useMemo: function (fn) { return fn(); }, useCallback: function (fn) { return fn; },
+      useRef: function (value) { return { current: value }; },
+      memo: function (fn) { return fn; }, forwardRef: function (fn) { return fn; },
+      createContext: function () { return {}; }, useContext: function () { return {}; }
+    },
+    'react/jsx-runtime': { jsx: jsx, jsxs: jsx, jsxDEV: jsx, Fragment: 'Fragment' }
+  };
+  function baselineRequire(specifier) {
+    requested.push(specifier);
+    if (Object.prototype.hasOwnProperty.call(moduleTable, specifier)) return moduleTable[specifier];
+    throw new Error('cannot resolve "' + specifier + '" — not a seed word, not a materialized module, and not a row in the boot graph');
+  }
+  baselineRequire.async = function (specifier) {
+    return Promise.reject(new Error('cannot resolve "' + specifier + '" asynchronously — the module table is closed'));
+  };
+
+  /* ---- 3. load client.js the way the shell does, then materialize ---- */
+  var script = document.createElement('script');
+  script.src = 'client.js';
+
+  script.onload = function () {
+    try {
+      head('module registration');
+      if (registrations.length !== 1) { bad('expected exactly one module registration, got ' + registrations.length); return finish(); }
+      var registration = registrations[0];
+      if (registration.id !== 'dsh-project-room') bad('registration id must be the package name, got ' + registration.id);
+      else ok('registered module id = dsh-project-room');
+      if (registration.chunk) bad('a chunk registration would need a fetch the closed table forbids');
+      else ok('no chunk registration');
+      if (typeof registration.factory !== 'function') { bad('factory is not a function'); return finish(); }
+
+      head('materialization');
+      var exports = registration.factory(baselineRequire);
+      if (typeof exports.apply !== 'function') bad('exports.apply is not a function');
+      else ok('exports.apply is a function');
+      if (!Array.isArray(exports.inject)) bad('exports.inject must be an array');
+      else ok('exports.inject = [' + exports.inject.join(', ') + ']');
+
+      var foreign = requested.filter(function (s) { return s !== 'react' && s !== 'react/jsx-runtime'; });
+      if (foreign.length) bad('the factory required modules outside the closed table: ' + foreign.join(', '));
+      else ok('factory required only: ' + (requested.join(', ') || '(nothing)'));
+
+      head('apply(ctx) wiring');
+      var applied = [];
+      var injected = [];
+      var ctx = {
+        slots: {
+          inject: function (key, callback) { injected.push(key); return callback(); },
+          register: function (config, component) {
+            applied.push({ name: config.name, id: config.id, key: config.key, isComponent: typeof component === 'function' });
+            return function () {};
+          }
+        },
+        effect: function (fn) { return fn(); },
+        get: function () { return undefined; },
+        logger: console
+      };
+      try { exports.apply(ctx); }
+      catch (error) { bad('apply(ctx) threw: ' + (error && error.stack ? error.stack : String(error))); return finish(); }
+
+      var names = applied.map(function (entry) { return entry.name + ':' + (entry.id || entry.key); }).sort();
+      var expected = ['main:project-room', 'sidebar.panellist:project-room'];
+      if (names.join('|') !== expected.join('|')) bad('registered slots were ' + names.join(', ') + '; expected ' + expected.join(', '));
+      else ok('apply registered exactly ' + names.join(', '));
+      applied.forEach(function (entry) {
+        if (!entry.isComponent) bad(entry.name + ' was given a non-component');
+      });
+      if (injected.sort().join(',') !== 'main,sidebar.panellist') bad('slot injections were ' + injected.join(', '));
+      else ok('slot injections = main, sidebar.panellist');
+
+      head('component bodies');
+      var internals = exports.__internals || {};
+      ['ProjectRoomPanel', 'Composer', 'Timeline', 'Board', 'MemberList', 'MemberDetail', 'CreateRoom', 'MemberMenu', 'Avatar', 'MentionText'].forEach(function (name) {
+        if (typeof internals[name] !== 'function') { bad('__internals.' + name + ' is missing'); return; }
+        try {
+          // React is stubbed, so a render returns null; the point is that the
+          // function body executes without throwing.
+          internals[name]({ members: [], messages: [], room: {}, models: [], settings: {} });
+          ok(name + '() executed without throwing');
+        } catch (error) {
+          bad(name + '() threw: ' + (error && error.message ? error.message : String(error)));
+        }
+      });
+
+      if (typeof internals.CSS !== 'string' || internals.CSS.indexOf('dpr_root') === -1) bad('the stylesheet is missing from __internals');
+      else ok('stylesheet present (' + internals.CSS.length + ' chars)');
+
+      finish();
+    } catch (error) {
+      bad('materialization threw: ' + (error && error.stack ? error.stack : String(error)));
+      finish();
+    }
+  };
+
+  script.onerror = function () {
+    bad('client.js could not be loaded by a classic <script> tag');
+    finish();
+  };
+
+  function finish() {
+    var summary = 'HARNESS-RESULT: ' + (failures === 0 ? 'PASS' : 'FAIL') + ' (' + (checks - failures) + '/' + checks + ' checks)';
+    line(summary, failures === 0 ? 'ok' : 'bad');
+    console.log(summary);
+    document.title = summary;
+  }
+
+  document.head.appendChild(script);
+})();
+</script>
+</body>
+</html>

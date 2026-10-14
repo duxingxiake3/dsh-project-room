@@ -1163,8 +1163,10 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
           window.removeEventListener('keydown', onKey);
         };
       }, [onClose]);
-      if (!state.open) return null;
-      const member = members.find((entry) => entry.id === state.memberId);
+      // `state` is owned by the panel and may not be materialised yet on a first
+      // render; treat a missing state as "no menu" rather than throwing.
+      if (!state || !state.open) return null;
+      const member = (members ?? []).find((entry) => entry.id === state.memberId);
       if (!member) return null;
       const self = member.id === state.selfId;
       const item = (label, action, options) =>
@@ -1832,6 +1834,10 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
       const { member, models, settings, onModelChange, onControl, onClose, routes } = props;
       const [pending, setPending] = useState(null);
       const [busy, setBusy] = useState(false);
+      // A selected member can leave the room (retired, or dropped by a refresh)
+      // between the click and the render. Rendering nothing is better than a panel
+      // that throws: the whole workspace shares this React tree.
+      if (!member || !member.id) return null;
       const observed = (routes ?? []).find((route) => route.memberId === member.id);
       const options = (models ?? []).filter((profile) => profile.capabilityStatus !== 'unavailable');
       return jsxs('div', {
