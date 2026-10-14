@@ -310,167 +310,32 @@
  * @property {object} [details]
  */
 
-/** Route served by the plugin's host half on the authenticated `/api` channel. */
-export const ROUTE = '/api/dsh-project-room';
-
-/** Wire protocol marker for the message envelope handed to a member session. */
-export const ENVELOPE_PROTOCOL = 'project-room.v1';
-
-/* ------------------------------------------------------------------ *
- * Mention parsing vocabulary shared by client and server
- * ------------------------------------------------------------------ */
-
-/** ASCII `@` and full-width `＠`. */
-export const AT_SIGN = '@';
-export const AT_SIGN_FULL_WIDTH = '\uFF20';
-
-/** Authored time of a body is always stored as UTC ISO 8601. */
-export const TIME_FORMAT = 'utc-iso8601';
-
 /**
- * Natural Chinese for each delivery state, used by the timeline. Kept beside
- * the states so the UI cannot invent a friendlier but untrue word.
- * @type {Readonly<Record<DeliveryStatus, string>>}
+ * Wire constants, label tables, the task transition table and the role templates
+ * are declared in `vocabulary.js` — the dependency-free module BOTH halves load,
+ * where the browser half receives them as a generated chunk. They are re-exported
+ * here so host modules keep importing everything from this file, without a second
+ * definition that could drift out of step with the browser's copy.
+ *
+ * The types this file owns (rooms, members, messages, tasks, decisions,
+ * artifacts, host capabilities and the wire error shape) stay declared here.
  */
-export const DELIVERY_LABELS = Object.freeze({
-  pending: '等待发送',
-  paused: '已暂停，消息保留',
-  admitting: '正在交给目标成员',
-  accepted: '已送达，尚未确认取用',
-  claimed: '对方本轮已取用',
-  replied: '已回复',
-  discarded: '已被宿主取消',
-  failed: '投递失败',
-  uncertain: '无法确认是否送达，正在核对',
-});
+export {
+  ROUTE,
+  ENVELOPE_PROTOCOL,
+  AT_SIGN,
+  AT_SIGN_FULL_WIDTH,
+  TIME_FORMAT,
+  DELIVERY_LABELS,
+  TASK_STATUS_LABELS,
+  TASK_TRANSITIONS,
+  MEMBER_STATUS_LABELS,
+  ROLE_TEMPLATES,
+  roleTemplate,
+  canTransition,
+  isoTimestamp,
+} from './vocabulary.js';
 
-/**
- * Natural Chinese for each task state.
- * @type {Readonly<Record<TaskStatus, string>>}
- */
-export const TASK_STATUS_LABELS = Object.freeze({
-  proposed: '提议中',
-  ready: '就绪',
-  in_progress: '执行中',
-  blocked: '受阻',
-  submitted: '已提交',
-  verifying: '验收中',
-  accepted: '已验收',
-  rework: '待返工',
-  superseded: '已被新版替代',
-  failed: '已失败',
-  cancelled: '已取消',
-});
-
-/**
- * Legal task transitions. Anything absent is rejected with
- * `REVISION_CONFLICT`-free, explicit validation rather than silently accepted.
- * @type {Readonly<Record<TaskStatus, readonly TaskStatus[]>>}
- */
-export const TASK_TRANSITIONS = Object.freeze({
-  proposed: ['ready', 'cancelled', 'superseded', 'blocked'],
-  ready: ['in_progress', 'blocked', 'cancelled', 'superseded'],
-  in_progress: ['submitted', 'blocked', 'failed', 'cancelled', 'rework'],
-  blocked: ['ready', 'in_progress', 'cancelled', 'superseded'],
-  submitted: ['verifying', 'rework', 'accepted'],
-  verifying: ['accepted', 'rework', 'failed'],
-  accepted: ['superseded', 'rework'],
-  rework: ['in_progress', 'submitted', 'cancelled'],
-  superseded: [],
-  failed: ['in_progress', 'cancelled'],
-  cancelled: [],
-});
-
-/**
- * Role templates. A template supplies duties and a default handle; it never
- * pins a model brand (design D11).
- * @type {ReadonlyArray<{ role: TeamRole, handle: string, title: string, aliases: string[], duties: string, defaultObjectives: string[] }>}
- */
-export const ROLE_TEMPLATES = Object.freeze([
-  {
-    role: 'coordinator',
-    handle: 'coordinator',
-    title: '主代理',
-    aliases: ['主代理', '队长', '协调'],
-    duties: '理解目标、检查现状、拆分工作、安排成员、协调依赖、组织验收。',
-    defaultObjectives: ['拆分项目目标并安排成员', '汇总变更与组织验收'],
-  },
-  {
-    role: 'frontend',
-    handle: 'frontend',
-    title: '前端',
-    aliases: ['前端'],
-    duties: '界面、交互、前端数据接入与前端自检。',
-    defaultObjectives: ['实现前端交付物', '与后端对齐接口后联调'],
-  },
-  {
-    role: 'backend',
-    handle: 'backend',
-    title: '后端',
-    aliases: ['后端'],
-    duties: '接口、数据、服务端逻辑、错误语义与边界处理。',
-    defaultObjectives: ['实现服务端接口与错误语义', '公布接口约定供前端与测试使用'],
-  },
-  {
-    role: 'tester',
-    handle: 'tester',
-    title: '测试',
-    aliases: ['测试', '质量'],
-    duties: '用例设计、真实执行记录、缺陷复现与验收证据。',
-    defaultObjectives: ['编写并运行用例', '在集成结果上验证并记录证据'],
-  },
-  {
-    role: 'devops',
-    handle: 'devops',
-    title: '运维',
-    aliases: ['运维', '部署'],
-    duties: '构建、本地运行说明、依赖与环境可复现性。',
-    defaultObjectives: ['整理构建与启动说明', '在可运行版本上复跑并记录'],
-  },
-  {
-    role: 'designer',
-    handle: 'designer',
-    title: '设计',
-    aliases: ['设计', '交互'],
-    duties: '交互与视觉约定、状态与错误呈现规范。',
-    defaultObjectives: ['给出交互与状态约定'],
-  },
-  {
-    role: 'docs',
-    handle: 'docs',
-    title: '文档',
-    aliases: ['文档', '说明'],
-    duties: '说明文档、使用步骤与变更记录。',
-    defaultObjectives: ['补齐使用与变更文档'],
-  },
-]);
-
-/**
- * Look one role template up.
- * @param {string} role
- * @returns {(typeof ROLE_TEMPLATES)[number] | undefined}
- */
-export function roleTemplate(role) {
-  return ROLE_TEMPLATES.find((template) => template.role === role);
-}
-
-/**
- * Whether a task transition is legal.
- * @param {TaskStatus} from
- * @param {TaskStatus} to
- * @returns {boolean}
- */
-export function canTransition(from, to) {
-  if (from === to) return true;
-  const allowed = TASK_TRANSITIONS[from];
-  return Array.isArray(allowed) && allowed.includes(to);
-}
-
-/**
- * Build a successful wire reply.
- * @param {object} data
- * @returns {{ ok: true } & object}
- */
 export function ok(data) {
   return { ok: true, ...data };
 }
@@ -502,13 +367,4 @@ export class RoomError extends Error {
     this.code = code;
     if (details !== undefined) this.details = details;
   }
-}
-
-/**
- * ISO 8601 UTC timestamp for "now".
- * @param {number} [epochMs]
- * @returns {string}
- */
-export function isoTimestamp(epochMs = Date.now()) {
-  return new Date(epochMs).toISOString();
 }

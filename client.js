@@ -317,7 +317,7 @@ window.__ModuleLoader__.load({
      * ------------------------------------------------------------------ */
 
     function Composer(props) {
-      const { room, members, selfId, onSend, onError, busy } = props;
+      const { room, members, selfId, onSend, onError, busy, pendingMention, onMentionHandled } = props;
       const [body, setBody] = useState('');
       const [chips, setChips] = useState([]);
       const [picker, setPicker] = useState({ open: false, query: '', index: 0, start: -1 });
@@ -357,6 +357,19 @@ window.__ModuleLoader__.load({
         },
         [body],
       );
+
+      // An avatar-menu "@ him" request lands here: insert the chip at the caret of
+      // the existing draft and keep focus, WITHOUT sending (the design notes, AT02).
+      useEffect(() => {
+        if (!pendingMention?.memberId) return;
+        const member = members.find((entry) => entry.id === pendingMention.memberId);
+        if (!member) {
+          onMentionHandled?.();
+          return;
+        }
+        insertChip(member);
+        onMentionHandled?.();
+      }, [pendingMention, members, insertChip, onMentionHandled]);
 
       /** Recompute the local preview on every keystroke — same rules as the server. */
       const preview = useMemo(() => {
@@ -1147,6 +1160,10 @@ window.__ModuleLoader__.load({
       const [selectedMember, setSelectedMember] = useState(null);
       const [replyTo, setReplyTo] = useState(null);
       const [notice, setNotice] = useState(null);
+      // A mention requested from an avatar menu travels as state, so the composer
+      // can put the chip at the caret of the draft the user already typed. A window
+      // event would have raced the composer's own state and lost the draft.
+      const [pendingMention, setPendingMention] = useState(null);
 
       const selfId = useMemo(() => state?.members?.find((member) => member.kind === 'human')?.id ?? null, [state]);
 
@@ -1234,9 +1251,18 @@ window.__ModuleLoader__.load({
         async (action, member) => {
           setMenu({ open: false, x: 0, y: 0, memberId: null, messageId: null, selfId });
           if (action === 'mention') {
-            // The menu's purpose is to insert a chip without sending (the design notes).
-            setNotice({ kind: 'ok', text: `已选择 ${member.displayName}。在输入框按“@ 成员”确认接收人，或直接写 @${member.handle}。` });
-            window.dispatchEvent(new CustomEvent('dpr:mention', { detail: { memberId: member.id, displayName: member.displayName } }));
+            // The menu's whole purpose is to put a chip in the composer WITHOUT
+            // sending (the design notes, AT02). The chip travels as state, not as a
+            // window event, so the composer can insert it at the caret of the
+            // draft the user already typed.
+            setPendingMention({ memberId: member.id, displayName: member.displayName, at: Date.now() });
+            setNotice({
+              kind: 'ok',
+              text:
+                member.id === selfId
+                  ? '已把你自己插入输入框（只作留注记，不会触发模型）。'
+                  : `已把 ${member.displayName} 插入输入框，按需要继续补充内容再发送。`,
+            });
             return;
           }
           if (action === 'reply') {
@@ -1294,16 +1320,6 @@ window.__ModuleLoader__.load({
       );
 
       // The composer asks for a chip when the avatar menu says "@ 他".
-      useEffect(() => {
-        const handler = (event) => {
-          const member = state?.members?.find((entry) => entry.id === event.detail?.memberId);
-          if (!member) return;
-          setNotice({ kind: 'ok', text: `已把 ${member.displayName} 记为接收人；在输入框里继续写内容即可。` });
-        };
-        window.addEventListener('dpr:mention', handler);
-        return () => window.removeEventListener('dpr:mention', handler);
-      }, [state]);
-
       const onAction = useCallback(
         async (action, payload) => {
           if (action !== 'retry') return;
@@ -1440,6 +1456,8 @@ window.__ModuleLoader__.load({
                         members: state.members,
                         selfId,
                         busy,
+                        pendingMention,
+                        onMentionHandled: () => setPendingMention(null),
                         onSend: send,
                         onError: (message) => setError(message),
                       }),

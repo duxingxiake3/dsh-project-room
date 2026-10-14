@@ -148,7 +148,11 @@ export class HostAdapter {
       ownedSessions,
       // A borrowed user session can be observed and delivered to through the
       // same public input API; the plugin never claims ownership of it.
-      borrowedMainBinding: ownedSessions && has('sessionQuery'),
+      // Binding a user's live session needs the public session query surface, NOT
+      // an owned session of our own: the two capabilities are independent, and
+      // deriving this one from `ownedSessions` would have reported a feature the
+      // host cannot actually provide.
+      borrowedMainBinding: has('sessionQuery') || has('sessions'),
       steer,
       stableInputIdentity: true,
       lookupAcceptedInput: ownedSessions,
@@ -699,7 +703,7 @@ export function readDshVersion() {
   try {
     const profileDir = process.env.DSH_PROFILE_DIR;
     if (profileDir) {
-      const manifest = join(profileDir, 'node_modules', 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json');
+      const manifest = join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json');
       const parsed = JSON.parse(readFileSync(manifest, 'utf8'));
       return { version: parsed.version ?? 'unknown', resolvedFrom: manifest };
     }

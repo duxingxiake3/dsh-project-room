@@ -206,10 +206,16 @@ export class MessageService {
     });
 
     if (input.schedule !== false && this.delivery) {
+      // The project's preferred delivery mode is `steer` (the design notes): a member
+      // that is mid-turn should receive the message at its nearest step boundary.
+      // The coordinator still decides from the member's REAL state and the host's
+      // real capabilities, and records which mode actually happened — a preference
+      // must never be reported as a fact (AT13).
+      const preferred = room.config?.delivery?.preferredMode === 'steer' ? 'steer' : 'queue';
       const scheduled = await this.delivery.schedule({
         message: this.store.getMessage(messageId),
         author,
-        mode: input.mode ?? 'queue',
+        mode: input.mode ?? preferred,
         purpose,
       });
       for (const entry of scheduled) {

@@ -300,6 +300,44 @@ describe('project room — chat versus requirement change (AT10)', () => {
   });
 });
 
+describe('project room — delivery mode follows the real member state (AT12/AT13)', () => {
+  it('reaches a running member at a step boundary and an idle one on its next turn', async (t) => {
+    const { stack, room, agents, human } = await freshRoom(t);
+    const sessionId = agents.backend.sessionId;
+
+    // Running: the host supports a step boundary, so the envelope is steered in.
+    stack.host.setAgentStatus(sessionId, 'running');
+    const running = await stack.messages.send({
+      roomId: room.id,
+      authorId: human.id,
+      clientMessageId: 'steer-1',
+      body: '@backend 打断一下：字段名最后还是按 v1。',
+    });
+    const steered = running.message.deliveries[0];
+    assert.equal(steered.requestedMode, 'steer', '正在执行的成员默认在最近的安全步骤边界处理');
+    assert.equal(steered.actualMode, 'steer');
+    assert.match(steered.detail, /步骤边界/);
+    assert.equal(stack.host.received(sessionId).at(-1).mode, 'steer', '宿主收到的是插入而不是新起一轮');
+    assert.equal(stack.host.record(sessionId).agent.inbox.nextStep.length, 1);
+    assert.equal(stack.host.record(sessionId).agent.inbox.nextTurn.length, 0);
+
+    // Idle: an ordinary next turn, and the ledger records which one happened.
+    stack.host.setAgentStatus(sessionId, 'idle');
+    const idle = await stack.messages.send({
+      roomId: room.id,
+      authorId: human.id,
+      clientMessageId: 'queue-1',
+      body: '@backend 顺便把限流也加上。',
+    });
+    const queued = idle.message.deliveries[0];
+    assert.equal(queued.requestedMode, 'queue');
+    assert.equal(queued.actualMode, 'queue');
+    assert.equal(queued.detail, null);
+    assert.equal(stack.host.received(sessionId).at(-1).mode, 'queue');
+    assert.equal(stack.host.record(sessionId).agent.inbox.nextTurn.length, 1);
+  });
+});
+
 describe('project room — partial delivery failure (AT14)', () => {
   it('reports per-recipient status and never re-delivers the successful one', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);

@@ -1041,6 +1041,7 @@ export class RoomStore {
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          on conflict (message_id, recipient_id) do update set
            status = excluded.status,
+           requested_mode = excluded.requested_mode,
            actual_mode = excluded.actual_mode,
            host_message_id = coalesce(excluded.host_message_id, delivery.host_message_id),
            delivery_attempt = excluded.delivery_attempt,

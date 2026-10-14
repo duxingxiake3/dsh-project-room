@@ -280,13 +280,25 @@ export class DeliveryCoordinator {
     }
   }
 
+  /**
+   * Decide the delivery mode for one recipient, from facts rather than wishes.
+   *
+   * `steer` means "insert at the nearest step boundary of a RUNNING turn". It is
+   * only meaningful, and only truthful, when the host supports step boundaries and
+   * the member is actually mid-turn. For an idle member the same call would be an
+   * ordinary next turn, so the recorded mode says `queue` — the point is that the
+   * timeline shows what really happened, not what was preferred (the design notes,
+   * AT13).
+   *
+   * @param {'queue' | 'steer'} mode
+   * @param {object} recipient
+   * @returns {'queue' | 'steer'}
+   */
   #modeFor(mode, recipient) {
-    if (mode === 'steer') return 'steer';
     const capabilities = this.adapter.capabilities();
-    const status = this.adapter.statusOf(recipient.id);
-    // A running member is the only case where a step boundary is meaningful.
-    if (capabilities.steer && status === 'running') return 'steer';
-    return 'queue';
+    if (!capabilities.steer) return 'queue';
+    if (this.adapter.statusOf(recipient.id) !== 'running') return 'queue';
+    return mode === 'steer' ? 'steer' : 'queue';
   }
 
   #view(recipientId, recipientName, status, detail) {

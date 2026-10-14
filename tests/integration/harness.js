@@ -255,10 +255,6 @@ export function createFakeHost(options = {}) {
       records.get(resumeOptions.resumeSessionId)?.recovered.push(resumeOptions.resumeSessionId);
       return handle;
     },
-    /** The pre-facade alias, for the same reason as `createAgent`. */
-    async resumeAgent(_ownerCtx, resumeOptions) {
-      return agentsService.resume(resumeOptions);
-    },
   };
 
   const llm = {
@@ -376,11 +372,6 @@ export function createFakeHost(options = {}) {
       }));
     },
 
-    /** All sessions that received at least one envelope (creation order). */
-    sessions() {
-      return order.map((record) => record.sessionId);
-    },
-
     /** @param {string} sessionId */
     record(sessionId) {
       return requireRecord(sessionId);
@@ -460,14 +451,6 @@ export function createFakeHost(options = {}) {
       record.agent.inbox.nextStep = record.agent.inbox.nextStep.filter(keep);
       record.agent.session.events = record.agent.session.events.filter((event) => event.id !== hostMessageId);
       record.received = record.received.filter((entry) => entry.message?.id !== hostMessageId);
-    },
-
-    /** Drop the plugin's hold on one member's session, as unload would. */
-    async releaseSession(sessionId) {
-      const record = requireRecord(sessionId);
-      await record.handle?.dispose?.();
-      record.disposed = true;
-      record.listeners.clear();
     },
 
     /** Run every `ctx.effect` disposer, newest first (plugin unload). */
