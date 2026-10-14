@@ -1,3 +1,35 @@
+# Project Room — the bundle's own patch layer.
+#
+# This layer performs two jobs.
+#
+# 1. Insert the loader row, so selecting `dsh-project-room` in
+#    `dsh.profile.bundles` actually mounts the plugin. A bare `- id:` row in a
+#    profile patch only toggles an existing entry; it cannot create one.
+#
+# 2. Supply `memberAgentPreset`, the preset member sessions are created under.
+#
+#    This belongs here rather than only in the plugin's Config because it is the
+#    deployment's decision about which preset a project room's members run under,
+#    and because the bundled patch layer is applied unambiguously — measured in
+#    the AT39 trial, while a profile-level `config:` block on this row did not
+#    reach `apply()` (the host reports this entry's Config as `unsupported`, and
+#    members still came up without a preset).
+#
+#    Why it is needed at all: in this desktop profile `tool-fs`,
+#    `tool-fs-search`, `tool-pwsh` and `tool-jobs` are disabled at the root, and
+#    their only mount point is inside an agent preset. An agent created without
+#    one therefore has no file or shell tools — which is exactly what four
+#    members reported, item for item, before this was set.
+#
+#    `standard` rather than `cordis`: both mount the same tool plugins, but
+#    `cordis` additionally mounts creator-mode and plugin-development skills that
+#    room members have no business carrying.
+#
+#    A profile may still override this by targeting the same id, and the plugin's
+#    own `memberAgentPreset` Config key remains the in-code default when this
+#    layer is not used.
 - insert:
     - id: project-room
       name: 'dsh-project-room'
+      config:
+        memberAgentPreset: 'standard'
