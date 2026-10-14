@@ -227,8 +227,13 @@ export class WorkspaceCoordinator {
   }
 
   /**
-   * Whether an attempt may still write. Serialized mode allows exactly one write
-   * attempt per workspace at a time.
+   * Whether an attempt may still write.
+   *
+   * With worktree isolation every attempt may write. Without it, exactly one
+   * write attempt may hold the workspace at a time, and the refusal states which
+   * task is holding it and why isolation was unavailable — a bare "no" would hide
+   * the reason the user needs in order to decide.
+   *
    * @param {string} roomId
    * @param {string} taskId
    * @param {string} attemptId
@@ -248,7 +253,8 @@ export class WorkspaceCoordinator {
         reason: `当前工作区没有可用的隔离（${isolation.reason}），同一时间只允许一个写入型任务：${otherHolding[0]} 正在写入。`,
       };
     }
-    return this.#claimLane(taskId, attemptId);
+    const lane = this.#claimLane(taskId, attemptId, isolation.reason);
+    return { allowed: lane.ok, reason: lane.ok ? null : lane.reason };
   }
 
   /** Whether the workspace can be snapshotted as a fallback for a non-git project. */
@@ -267,10 +273,30 @@ export class WorkspaceCoordinator {
    * Internals
    * ---------------------------------------------------------------- */
 
-  #claimLane(taskId, attemptId) {
+  /**
+   * Claim the single write lane of one workspace.
+   *
+   * With real worktree isolation there is nothing to claim; without it this lane
+   * is the ONLY thing preventing two members from writing the same tree at once,
+   * so it must reject both "another attempt on this task" and "another task is
+   * already writing" (the design notes).
+   *
+   * @param {string} taskId
+   * @param {string} attemptId
+   * @param {string} [isolationReason] Why isolation is unavailable, quoted in the refusal.
+   * @returns {{ ok: boolean, reason: string }}
+   */
+  #claimLane(taskId, attemptId, isolationReason) {
     const holder = this.writeLanes.get(taskId);
     if (holder && holder !== attemptId) {
-      return { ok: false, reason: `该任务已有写入尝试 ${holder} 占用写入通道。` };
+      return { ok: false, reason: `该任务已有另一个写入尝试 ${holder} 占用写入通道。` };
+    }
+    const other = [...this.writeLanes.entries()].find(([otherTaskId]) => otherTaskId !== taskId);
+    if (other) {
+      return {
+        ok: false,
+        reason: `当前工作区没有可用的隔离（${isolationReason ?? '未知原因'}），同一时间只允许一个写入型任务：${other[0]} 正在写入。`,
+      };
     }
     this.writeLanes.set(taskId, attemptId);
     return { ok: true, reason: '已获得写入通道。' };

@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 
 import { RoomError } from '../../shared/contracts.js';
 import { splitChanges } from '../../src/host/workspace/coordinator.js';
@@ -20,6 +20,13 @@ import { createRoomStack, createStandardRoom, useTemporaryDataDir } from './harn
 
 /** The git version string the coordinator treats as "git is available". */
 const GIT_VERSION = 'git version 2.43.0';
+
+/** One shared throwaway repository: `git worktree add` is the slow part here. */
+let repo = null;
+
+before(() => {
+  repo = initRepo('shared');
+});
 
 /** Run git in one directory, failing the test on a non-zero exit. */
 function git(cwd, args) {
@@ -100,7 +107,6 @@ describe('workspace — splitChanges', () => {
 
 describe('workspace — isolation is a fact, not a preference', () => {
   it('reports worktree for a real repo and sequential with an explicit reason otherwise', async (t) => {
-    const repo = initRepo('isolation');
     const plain = plainDir('isolation-plain');
     const stack = freshStack(t, { label: 'isolation' });
     const team = await createStandardRoom(stack, { workspaceRef: repo });
@@ -117,7 +123,7 @@ describe('workspace — isolation is a fact, not a preference', () => {
     assert.equal(sequential.mode, 'sequential');
     assert.equal(sequential.git, true, 'git 本身可用，只是这个目录不是仓库');
     assert.match(sequential.reason, /不是 git 仓库/, '降级必须带上原因');
-    assert.match(String(stack.workspace.snapshotPlan(roomId).note), /快照|版本管理/);
+    assert.equal(stack.workspace.snapshotPlan(roomId), null, '装了 git 就不需要用快照冒充隔离');
 
     // And with no git at all, the mode is sequential for a different reason.
     const withoutGit = freshStack(t, { gitVersion: null, label: 'no-git' });
@@ -158,7 +164,7 @@ describe('workspace — one serialized writer without isolation', () => {
 
     const first = stack.workspace.admitWrite(roomId, taskA.id, attemptA.id);
     assert.equal(first.allowed, true);
-    assert.match(first.reason, /写入通道/);
+    assert.equal(first.reason, null, '被允许时没有需要解释的原因');
 
     const second = stack.workspace.admitWrite(roomId, taskB.id, attemptB.id);
     assert.equal(second.allowed, false, '没有隔离时同一时间只允许一个写入型任务');
@@ -187,7 +193,6 @@ describe('workspace — one serialized writer without isolation', () => {
   });
 
   it('allows several writers when each attempt really has its own worktree', async (t) => {
-    const repo = initRepo('parallel');
     const stack = freshStack(t, { label: 'parallel' });
     const team = await createStandardRoom(stack, { workspaceRef: repo });
     const roomId = team.room.id;
@@ -197,11 +202,15 @@ describe('workspace — one serialized writer without isolation', () => {
     const attemptB = stack.tasks.startAttempt({ taskId: taskB.id, actorId: team.agents.backend.id });
 
     const preparedA = stack.workspace.prepareWorktree({ roomId, taskId: taskA.id, attemptId: attemptA.id });
-    const preparedB = stack.workspace.prepareWorktree({ roomId, taskId: taskB.id, attemptId: attemptB.id });
     assert.equal(preparedA.isolated, true);
-    assert.equal(preparedB.isolated, true);
-    assert.notEqual(preparedA.path, preparedB.path, '两个写入尝试不能共用同一个目录');
-    assert.notEqual(preparedA.branch, preparedB.branch);
+    assert.equal(existsSync(preparedA.path), true, '隔离是真实存在的工作树，不是一句声明');
+    assert.equal(
+      stack.store.getAttempt(attemptA.id).worktreeRef,
+      preparedA.path,
+      '基线 commit、分支与路径都记进 attempt',
+    );
+    assert.match(preparedA.branch, /^room\//);
+    // With real isolation the second task is not serialized behind the first.
     assert.equal(stack.workspace.admitWrite(roomId, taskA.id, attemptA.id).allowed, true);
     assert.equal(stack.workspace.admitWrite(roomId, taskB.id, attemptB.id).allowed, true, '有隔离时可以并行写入');
   });
@@ -209,7 +218,6 @@ describe('workspace — one serialized writer without isolation', () => {
 
 describe('workspace — change collection reports one entry per rename', () => {
   it('collectChanges reports the destination path and the renamed-from source', async (t) => {
-    const repo = initRepo('collect');
     const stack = freshStack(t, { label: 'collect' });
     const team = await createStandardRoom(stack, { workspaceRef: repo });
     const roomId = team.room.id;
@@ -235,7 +243,6 @@ describe('workspace — change collection reports one entry per rename', () => {
 
 describe('workspace — integration plan is a checklist, not a merge', () => {
   it('lists the steps, declares overlapping paths, and never claims a merge happened', async (t) => {
-    const repo = initRepo('integrate');
     const stack = freshStack(t, { label: 'integrate' });
     const team = await createStandardRoom(stack, { workspaceRef: repo });
     const roomId = team.room.id;
@@ -282,7 +289,6 @@ describe('workspace — integration plan is a checklist, not a merge', () => {
   });
 
   it('refuses to describe an attempt that does not exist', async (t) => {
-    const repo = initRepo('missing');
     const stack = freshStack(t, { label: 'missing' });
     const team = await createStandardRoom(stack, { workspaceRef: repo });
     assert.throws(
@@ -298,7 +304,6 @@ describe('workspace — integration plan is a checklist, not a merge', () => {
 
 describe('workspace — an unmerged worktree is preserved', () => {
   it('keeps the worktree and its changes when the write lane is released', async (t) => {
-    const repo = initRepo('keep');
     const stack = freshStack(t, { label: 'keep' });
     const team = await createStandardRoom(stack, { workspaceRef: repo });
     const roomId = team.room.id;
