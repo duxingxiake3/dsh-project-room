@@ -29,7 +29,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { RoomError, isoTimestamp } from '../../shared/contracts.js';
+import { ROUTE, RoomError } from '../../shared/contracts.js';
 import { createRelayMessage, HostAdapter } from './adapter/host-adapter.js';
 import { DecisionService } from './decisions/decision-service.js';
 import { DeliveryCoordinator } from './delivery/coordinator.js';
@@ -41,6 +41,7 @@ import { MessageService } from './room/message-service.js';
 import { RoomService } from './room/room-service.js';
 import { RoomStore } from './storage/store.js';
 import { dataRoot } from './storage/paths.js';
+import { installErrorHooks, trace, traceError, writeReport } from './diagnostics.js';
 import { PlanningService } from './tasks/planning-service.js';
 import { TaskService } from './tasks/task-service.js';
 import { buildRoomTools } from './tools/room-tools.js';
@@ -51,6 +52,24 @@ import { WorkspaceCoordinator } from './workspace/coordinator.js';
 
 /** Cordis plugin name. */
 export const name = 'project-room';
+
+/**
+ * Services this plugin requires before `apply` runs.
+ *
+ * Cordis proxies `ctx.<service>` and REFUSES to hand back a service the plugin
+ * has not declared here — reading `ctx.tools` without `inject: ['tools']` throws
+ * `cannot get property "tools" without inject` and aborts activation. Declaring
+ * them is therefore what makes the plugin load at all, and it also makes the
+ * fiber wait for them instead of racing a half-built composition.
+ *
+ * `llm` is included because per-member model routing and the honest model
+ * catalogue are core product promises rather than optional extras; a composition
+ * without it would have to refuse the plugin's main feature, so it is better to
+ * not activate at all than to activate and lie. The adapter still reports what it
+ * can actually do (`capabilities()`), and `agentDefaultModel` is deliberately NOT
+ * required: it is only a fallback for "no project default configured".
+ */
+export const inject = ['tools', 'webServer', 'agents', 'llm', 'systemPrompt'];
 
 /**
  * Plugin configuration.
@@ -130,18 +149,29 @@ export const DEFAULT_CONFIG = Object.freeze({
  */
 export async function apply(ctx, config = {}) {
   const logger = ctx.logger ?? console;
+  // The trace is written before anything else so a crash later in this function
+  // still leaves a record of how far activation got. See ./diagnostics.js.
+  const disposeHooks = installErrorHooks(logger);
+  trace('apply.enter', { pid: process.pid });
   // The loader already validated and defaulted the config through `Config`, but
   // `apply` is also called directly by tests and by the recovery path, so the
   // defaults are applied once more here. Spreading `Config` itself would copy the
   // schema marker, hence DEFAULT_CONFIG.
   const options = { ...DEFAULT_CONFIG, ...config };
-  const disposers = [];
+  const disposers = [disposeHooks];
 
   /* ------------------------------------------------------------------ *
    * 1. Storage
    * ------------------------------------------------------------------ */
   const store = new RoomStore({ logger, ...(options.dataDir ? { file: `${options.dataDir}/rooms.sqlite` } : {}) });
-  store.open();
+  trace('storage.opening', { file: store.file, singleWriter: store.singleWriter });
+  try {
+    store.open();
+  } catch (error) {
+    traceError('storage.open', error);
+    throw error;
+  }
+  trace('storage.opened', { schemaVersion: store.getMeta('schemaVersion'), rooms: store.listRooms().length });
   disposers.push(() => store.close());
 
   /* ------------------------------------------------------------------ *
@@ -149,6 +179,15 @@ export async function apply(ctx, config = {}) {
    * ------------------------------------------------------------------ */
   const adapter = new HostAdapter({ ctx, logger });
   const capabilities = adapter.capabilities();
+  trace('capabilities.probed', {
+    dshVersion: capabilities.dshVersion,
+    coreResolvedFrom: capabilities.coreResolvedFrom,
+    ownedSessions: capabilities.ownedSessions,
+    perMemberModelRouting: capabilities.perMemberModelRouting,
+    steer: capabilities.steer,
+    modelCatalog: capabilities.modelCatalog,
+    notes: capabilities.notes,
+  });
   logger.info?.(
     `[project-room] host ${capabilities.dshVersion} · node ${capabilities.nodeVersion} · electron ${capabilities.electronVersion || 'n/a'} · ` +
       `owned sessions ${capabilities.ownedSessions ? 'yes' : 'NO'} · per-member routing ${capabilities.perMemberModelRouting ? 'yes' : 'NO'} · ` +
@@ -309,42 +348,64 @@ export async function apply(ctx, config = {}) {
    * 5. Tools and route
    * ------------------------------------------------------------------ */
   const tools = buildRoomTools({ rooms, messages, models, tasks, planning, decisions, artifacts, memberOfSession });
+  trace('tools.built', { count: tools.length, names: tools.map((tool) => tool.name) });
   const toolNames = [];
   if (ctx.tools?.register) {
+    trace('tools.registry', {
+      hasRegister: typeof ctx.tools.register === 'function',
+      hasSchemas: typeof ctx.tools.schemas === 'function',
+    });
     for (const definition of tools) {
-      disposers.push(ctx.tools.register(definition));
-      toolNames.push(definition.name);
+      // One malformed definition must not take the whole plugin down: the failure
+      // is recorded, named, and the remaining tools still register. A plugin that
+      // cannot load reports nothing at all, which is strictly worse.
+      trace('tools.register.begin', { name: definition.name });
+      try {
+        disposers.push(ctx.tools.register(definition));
+        toolNames.push(definition.name);
+        trace('tools.register.ok', { name: definition.name });
+      } catch (error) {
+        traceError(`tools.register.${definition.name}`, error);
+        logger.warn?.(`[project-room] tool "${definition.name}" failed to register: ${error?.message ?? error}`);
+      }
     }
-    logger.info?.(`[project-room] registered ${tools.length} room tools`);
+    trace('tools.registered', { registered: toolNames.length, total: tools.length });
+    logger.info?.(`[project-room] registered ${toolNames.length}/${tools.length} room tools`);
   } else {
     logger.warn?.('[project-room] no tool registry on this context; room tools are unavailable in this composition.');
   }
 
   if (options.httpRoute && ctx.webServer?.register) {
-    disposers.push(
-      registerRoomRoute({
-        ctx,
-        store,
-        rooms,
-        context,
-        messages,
-        models,
-        tasks,
-        planning,
-        decisions,
-        artifacts,
-        adapter,
-        delivery,
-        observer,
-        guard,
-        recovery,
-        workspace,
-        ensureMemberSession,
-        memberOfSession,
-        capabilities,
-        logger,
-      }),
-    );
+    try {
+      disposers.push(
+        registerRoomRoute({
+          ctx,
+          store,
+          rooms,
+          context,
+          messages,
+          models,
+          tasks,
+          planning,
+          decisions,
+          artifacts,
+          adapter,
+          delivery,
+          observer,
+          guard,
+          recovery,
+          workspace,
+          ensureMemberSession,
+          memberOfSession,
+          capabilities,
+          logger,
+        }),
+      );
+      trace('route.registered', { path: ROUTE });
+    } catch (error) {
+      traceError('route.register', error);
+      logger.warn?.(`[project-room] HTTP route unavailable: ${error?.message ?? error}`);
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -352,9 +413,13 @@ export async function apply(ctx, config = {}) {
    * ------------------------------------------------------------------ */
   if (options.autoResume !== false) {
     try {
-      const report = await recovery.recoverAll();
-      if (report.rooms.length > 0) logger.info?.(`[project-room] recovery: ${JSON.stringify(report.summary)}`);
+      const recoveryReport = await recovery.recoverAll();
+      trace('recovery.done', recoveryReport.summary);
+      if (recoveryReport.rooms.length > 0) {
+        logger.info?.(`[project-room] recovery: ${JSON.stringify(recoveryReport.summary)}`);
+      }
     } catch (error) {
+      traceError('recovery', error);
       logger.warn?.(`[project-room] recovery failed: ${error?.message ?? error}`);
     }
   }
@@ -374,74 +439,25 @@ export async function apply(ctx, config = {}) {
   // One boot record: the exact runtime this activation resolved against, the
   // tools it registered, and the capabilities it probed. Written into the
   // plugin's own data directory so "which version is really running" is answered
-  // by evidence instead of by reading a path and assuming.
-  writeBootReport(
-    {
-      capabilities,
-      toolNames,
-      availableTools: safeToolNames(ctx),
-      memberToolRestrictions: [...adapter.toolRestrictions.entries()].map(([memberId, deny]) => ({ memberId, deny })),
-      rooms: store.listRooms().length,
-      dataRoot: dataRoot(),
-    },
-    logger,
-  );
+  // by evidence instead of by reading a path and assuming. `writeReport` (in
+  // ./diagnostics.js) also carries the phase trail, so a later crash can be read
+  // back to the step it reached.
+  writeReport({
+    pluginVersion: pluginVersion(),
+    dshVersion: capabilities.dshVersion,
+    coreResolvedFrom: capabilities.coreResolvedFrom,
+    nodeVersion: capabilities.nodeVersion,
+    electronVersion: capabilities.electronVersion,
+    capabilities,
+    registeredTools: toolNames,
+    availableTools: safeToolNames(ctx),
+    memberToolRestrictions: [...adapter.toolRestrictions.entries()].map(([memberId, deny]) => ({ memberId, deny })),
+    rooms: store.listRooms().length,
+    dataRoot: dataRoot(),
+  });
 
+  trace('activation.ready');
   logger.info?.(`[project-room] ready · core ${capabilities.dshVersion} (${capabilities.coreResolvedFrom ?? 'unresolved'})`);
-}
-
-/**
- * Write the activation record next to the room database.
- *
- * Deliberately evidence-shaped: version, the exact file the framework version was
- * read from, the tool names this activation registered, the global tool names the
- * context exposed, and the capability flags. A compatibility claim should be
- * checkable after the fact, not reconstructed from memory.
- *
- * @param {object} report
- * @param {object} [logger]
- */
-function writeBootReport(report, logger) {
-  try {
-    const target = join(dataRoot(), 'boot-report.json');
-    const previous = existsSync(target) ? JSON.parse(readFileSync(target, 'utf8')) : null;
-    const history = Array.isArray(previous?.history) ? previous.history.slice(-19) : [];
-    history.push({
-      at: isoTimestamp(),
-      dshVersion: report.capabilities.dshVersion,
-      coreResolvedFrom: report.capabilities.coreResolvedFrom,
-      nodeVersion: report.capabilities.nodeVersion,
-      electronVersion: report.capabilities.electronVersion,
-      toolCount: report.toolNames.length,
-      roomCount: report.rooms,
-    });
-    writeFileSync(
-      target,
-      JSON.stringify(
-        {
-          generatedAt: isoTimestamp(),
-          pluginVersion: pluginVersion(),
-          dshVersion: report.capabilities.dshVersion,
-          coreResolvedFrom: report.capabilities.coreResolvedFrom,
-          nodeVersion: report.capabilities.nodeVersion,
-          electronVersion: report.capabilities.electronVersion,
-          capabilities: report.capabilities,
-          registeredTools: report.toolNames,
-          availableTools: report.availableTools,
-          memberToolRestrictions: report.memberToolRestrictions,
-          roomCount: report.rooms,
-          dataRoot: report.dataRoot,
-          history,
-        },
-        null,
-        2,
-      ),
-      'utf8',
-    );
-  } catch (error) {
-    // A missing diagnostic file must never be the reason a project cannot run.
-    logger?.warn?.(`[project-room] boot report not written: ${error?.message ?? error}`);
-  }
 }
 
 /** This package's own version, read from its manifest. */
@@ -522,10 +538,7 @@ export function bindHumanSession(input) {
   return input.store.updateMember(input.memberId, { sessionId: input.sessionId, sessionOwnership: 'borrowed' });
 }
 
-/** Timestamp helper used by the route for cache-busting versions. */
-export const pluginStartedAt = isoTimestamp();
-
 /** Id for one plugin activation, used to make registrations idempotent. */
 export const activationId = randomUUID();
 
-export { createRelayMessage, RoomError };
+export { createRelayMessage, RoomError, trace, traceError, writeReport };

@@ -8,4 +8,4 @@
  * @module dsh-project-room
  */
 
-export { apply, name, Config, pluginStartedAt, activationId, bindHumanSession } from './src/host/index.js';
+export { apply, name, Config, inject, activationId, bindHumanSession, trace, traceError, writeReport } from './src/host/index.js';

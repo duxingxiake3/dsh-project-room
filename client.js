@@ -20,10 +20,7 @@
 
 window.__ModuleLoader__.load({
   id: 'dsh-project-room',
-  // The factory is async because the shared rule modules arrive as package-local
-  // chunks through `require.async`: they are fetched only when this plugin
-  // activates, not at every page boot.
-  factory: async (require) => {
+  factory: (require) => {
     const module = { exports: {} };
     const exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
@@ -31,21 +28,909 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const { jsx, jsxs, Fragment } = require('react/jsx-runtime');
     const { useCallback, useEffect, useMemo, useRef, useState } = React;
-    const V = await require.async('dsh-project-room#vocabulary');
-    const M = await require.async('dsh-project-room#mention-resolver');
 
-    const {
-      ROUTE,
-      ROLE_TEMPLATES,
-      DELIVERY_LABELS,
-      TASK_STATUS_LABELS,
-      MEMBER_STATUS_LABELS,
-      roleTemplate,
-      deliveryLabel,
-      taskLabel,
-      memberLabel,
-      isoTimestamp,
-    } = V;
+/* >>> GENERATED: shared rules (scripts/build-client.mjs) >>> */
+// Inlined from shared/ so the browser half is ONE classic script. The client module
+// table is closed, so a package-local chunk cannot be fetched at runtime.
+// ---- shared/vocabulary.js ----
+/**
+ * Project Room — shared vocabulary.
+ *
+ * The small, dependency-free half of the contracts: enumerations, their natural
+ * Chinese labels, the legal task transitions, role templates, and the wire error
+ * codes. Both halves load this module — the host as ESM, the browser through the
+ * generated `client.vocabulary.js` chunk — so a status can never be labelled two
+ * different ways on the two sides of the wire.
+ *
+ * Nothing here imports anything, which is exactly what makes it loadable in a
+ * classic browser script.
+ *
+ * @module dsh-project-room/shared/vocabulary
+ */
+
+/** ASCII `@` and its full-width twin. */
+const AT_SIGN = '@';
+const AT_SIGN_FULL_WIDTH = '\uFF20';
+
+/** Route served by the plugin's host half on the authenticated `/api` channel. */
+const ROUTE = '/api/dsh-project-room';
+
+/** Wire protocol marker for the message envelope handed to a member session. */
+const ENVELOPE_PROTOCOL = 'project-room.v1';
+
+/** Authored time is always stored as UTC ISO 8601. */
+const TIME_FORMAT = 'utc-iso8601';
+
+/** Everything a client may send as an action name starts with this. */
+const ACTION_PREFIX = 'room.';
+
+/**
+ * Delivery states. "Delivered" is not "read": `claimed` requires a real host
+ * observation (the design notes).
+ * @type {Readonly<Record<string, string>>}
+ */
+const DELIVERY_LABELS = Object.freeze({
+  pending: '等待发送',
+  paused: '已暂停，消息保留',
+  admitting: '正在交给目标成员',
+  accepted: '已送达，尚未确认取用',
+  claimed: '对方本轮已取用',
+  replied: '已回复',
+  discarded: '已被宿主取消',
+  failed: '投递失败',
+  uncertain: '无法确认是否送达，正在核对',
+});
+
+/**
+ * Task states (the design notes).
+ * @type {Readonly<Record<string, string>>}
+ */
+const TASK_STATUS_LABELS = Object.freeze({
+  proposed: '提议中',
+  ready: '就绪',
+  in_progress: '执行中',
+  blocked: '受阻',
+  submitted: '已提交',
+  verifying: '验收中',
+  accepted: '已验收',
+  rework: '待返工',
+  superseded: '已被新版替代',
+  failed: '已失败',
+  cancelled: '已取消',
+});
+
+/**
+ * Legal task transitions. Anything absent is rejected rather than accepted.
+ * @type {Readonly<Record<string, readonly string[]>>}
+ */
+const TASK_TRANSITIONS = Object.freeze({
+  proposed: ['ready', 'cancelled', 'superseded', 'blocked'],
+  ready: ['in_progress', 'blocked', 'cancelled', 'superseded'],
+  in_progress: ['submitted', 'blocked', 'failed', 'cancelled', 'rework'],
+  blocked: ['ready', 'in_progress', 'cancelled', 'superseded'],
+  submitted: ['verifying', 'rework', 'accepted'],
+  verifying: ['accepted', 'rework', 'failed'],
+  accepted: ['superseded', 'rework'],
+  rework: ['in_progress', 'submitted', 'cancelled'],
+  superseded: [],
+  failed: ['in_progress', 'cancelled'],
+  cancelled: [],
+});
+
+/**
+ * Member states. Deliberately separate from delivery and task state: `working`
+ * comes from a real agent status, never from a pending message.
+ * @type {Readonly<Record<string, string>>}
+ */
+const MEMBER_STATUS_LABELS = Object.freeze({
+  idle: '空闲',
+  working: '执行中',
+  awaiting_reply: '等待回复',
+  needs_user: '需要用户处理',
+  paused: '暂停',
+  offline: '离线 / 故障',
+});
+
+/**
+ * Role templates. A template supplies duties and a default handle; it never
+ * pins a model brand (design D11).
+ * @type {ReadonlyArray<{ role: string, handle: string, title: string, aliases: string[], duties: string, defaultObjectives: string[] }>}
+ */
+const ROLE_TEMPLATES = Object.freeze([
+  {
+    role: 'coordinator',
+    handle: 'coordinator',
+    title: '主代理',
+    aliases: ['主代理', '队长', '协调'],
+    duties: '理解目标、检查现状、拆分工作、安排成员、协调依赖、组织验收。',
+    defaultObjectives: ['拆分项目目标并安排成员', '汇总变更与组织验收'],
+  },
+  {
+    role: 'frontend',
+    handle: 'frontend',
+    title: '前端',
+    aliases: ['前端'],
+    duties: '界面、交互、前端数据接入与前端自检。',
+    defaultObjectives: ['实现前端交付物', '与后端对齐接口后联调'],
+  },
+  {
+    role: 'backend',
+    handle: 'backend',
+    title: '后端',
+    aliases: ['后端'],
+    duties: '接口、数据、服务端逻辑、错误语义与边界处理。',
+    defaultObjectives: ['实现服务端接口与错误语义', '公布接口约定供前端与测试使用'],
+  },
+  {
+    role: 'tester',
+    handle: 'tester',
+    title: '测试',
+    aliases: ['测试', '质量'],
+    duties: '用例设计、真实执行记录、缺陷复现与验收证据。',
+    defaultObjectives: ['编写并运行用例', '在集成结果上验证并记录证据'],
+  },
+  {
+    role: 'devops',
+    handle: 'devops',
+    title: '运维',
+    aliases: ['运维', '部署'],
+    duties: '构建、本地运行说明、依赖与环境可复现性。',
+    defaultObjectives: ['整理构建与启动说明', '在可运行版本上复跑并记录'],
+  },
+  {
+    role: 'designer',
+    handle: 'designer',
+    title: '设计',
+    aliases: ['设计', '交互'],
+    duties: '交互与视觉约定、状态与错误呈现规范。',
+    defaultObjectives: ['给出交互与状态约定'],
+  },
+  {
+    role: 'docs',
+    handle: 'docs',
+    title: '文档',
+    aliases: ['文档', '说明'],
+    duties: '说明文档、使用步骤与变更记录。',
+    defaultObjectives: ['补齐使用与变更文档'],
+  },
+]);
+
+/**
+ * Look one role template up.
+ * @param {string} role
+ * @returns {(typeof ROLE_TEMPLATES)[number] | undefined}
+ */
+function roleTemplate(role) {
+  return ROLE_TEMPLATES.find((template) => template.role === role);
+}
+
+/**
+ * Whether a task transition is legal.
+ * @param {string} from
+ * @param {string} to
+ * @returns {boolean}
+ */
+function canTransition(from, to) {
+  if (from === to) return true;
+  const allowed = TASK_TRANSITIONS[from];
+  return Array.isArray(allowed) && allowed.includes(to);
+}
+
+/**
+ * Natural Chinese for a wire error code, so the UI never shows a stack.
+ * @type {Readonly<Record<string, string>>}
+ */
+const ERROR_LABELS = Object.freeze({
+  MENTION_AMBIGUOUS: '点名有歧义，请先选择要联系的人',
+  MEMBER_UNAVAILABLE: '该成员当前不可用',
+  REVISION_CONFLICT: '版本冲突，请刷新后重试',
+  HOST_CAPABILITY_MISSING: '当前宿主缺少所需能力',
+  DELIVERY_UNCERTAIN: '投递状态不确定，正在核对',
+  ROOM_PAUSED: '项目已暂停',
+  NOT_A_ROOM_MEMBER: '你不是这个项目群的成员',
+  ARTIFACT_NOT_VERIFIED: '成果未经过核验',
+  NOT_FOUND: '没有找到对应内容',
+  INVALID_REQUEST: '请求不完整或格式不对',
+  FORBIDDEN: '当前身份不能执行这个操作',
+  INTERNAL: '插件内部错误',
+});
+
+/**
+ * ISO 8601 UTC timestamp for "now".
+ * @param {number} [epochMs]
+ * @returns {string}
+ */
+function isoTimestamp(epochMs = Date.now()) {
+  return new Date(epochMs).toISOString();
+}
+
+/**
+ * Human label for a delivery state.
+ * @param {string} status
+ * @returns {string}
+ */
+function deliveryLabel(status) {
+  return DELIVERY_LABELS[status] ?? status;
+}
+
+/**
+ * Human label for a task state.
+ * @param {string} status
+ * @returns {string}
+ */
+function taskLabel(status) {
+  return TASK_STATUS_LABELS[status] ?? status;
+}
+
+/**
+ * Human label for a member state.
+ * @param {string} status
+ * @returns {string}
+ */
+function memberLabel(status) {
+  return MEMBER_STATUS_LABELS[status] ?? status;
+}
+
+// ---- shared/mention-resolver.js ----
+/**
+ * Project Room — deterministic @ mention resolver.
+ *
+ * This module implements the design notes. It is the single source of truth for all
+ * three legal input paths (avatar menu, picker, plain text), and it is loaded by
+ * BOTH halves: the host imports it as ESM, the browser loads the same file
+ * through the client module table. Preview and server therefore cannot drift —
+ * a `@后端` that previews as one member resolves to that member on submit.
+ *
+ * Rules enforced here, in this order:
+ *   1. Mask body structure (fenced code, inline code, quote lines, link
+ *      targets, email local parts) before looking for `@`.
+ *   2. An `@` must start at text start, whitespace, or an allowed punctuation
+ *      boundary. `dev@example.com` and `npm@scope/pkg` never trigger.
+ *   3. Read one complete name run, or a bracketed name `@「前端 小林」`.
+ *   4. Exact unique handle first (ASCII case-insensitive), then alias, then
+ *      display name — all under NFC normalization. No LLM guessing, ever.
+ *   5. One member named twice yields exactly one target.
+ *   6. Text with no name boundary (`@前端你先看看`) is never split: it is
+ *      reported as a hint, not silently mis-delivered.
+ *   7. Names that match nothing, or match several members, are reported so the
+ *      UI can ask — never quietly redirected to the coordinator.
+ *
+ * @module dsh-project-room/shared/mention-resolver
+ */
+
+
+
+/* ------------------------------------------------------------------ *
+ * Character classes — kept explicit so the rules are auditable
+ * ------------------------------------------------------------------ */
+
+/** Full-width and half-width space characters. */
+const SPACE = /[\s\u00A0\u3000]/;
+
+/**
+ * Punctuation allowed immediately BEFORE an `@`. Word characters and
+ * `-`/`_`/`.`/`+` are deliberately absent, so email and package specifiers
+ * cannot trigger a mention.
+ */
+const BOUNDARY_BEFORE = new Set([
+  '(', '[', '{', '<', '"', "'", '「', '『', '【', '《', '（', '［', '｛', '〈', '“', '‘',
+  ',', '.', ';', ':', '!', '?', '，', '。', '；', '：', '！', '？', '、', '…', '~', '·',
+  '-', '—', '－', '/', '\\', '|', '*', '>', '=', '+', '％', '%', '&', '^', '$', '#', '@',
+]);
+
+/**
+ * Punctuation that ends a name run. Anything here stops the run, which is what
+ * makes `@后端，接口好了吗` resolve to `后端`.
+ */
+const TERMINATOR = new Set([
+  ' ', '\t', '\n', '\r', '\u00A0', '\u3000',
+  ',', '.', ';', ':', '!', '?', '"', "'", '(', ')', '[', ']', '{', '}', '<', '>',
+  '，', '。', '；', '：', '！', '？', '、', '…', '“', '”', '‘', '’', '（', '）',
+  '【', '】', '《', '》', '「', '」', '『', '』', '〈', '〉', '·', '—', '～', '~',
+  '/', '\\', '|', '*', '=', '+', '%', '&', '#', '$', '^', '`',
+]);
+
+/** Bracket pairs accepted for a name that contains spaces. */
+const BRACKETS = [
+  ['「', '」'],
+  ['『', '』'],
+  ['“', '”'],
+  ['《', '》'],
+  ['"', '"'],
+  ["'", "'"],
+];
+
+/** The literal `@all` style keywords that expand to the active member snapshot. */
+const EVERYONE_KEYWORDS = Object.freeze(['所有人', '全员', 'all', 'everyone', 'all-members']);
+
+/** The literal keywords that address the human user rather than an agent. */
+const HUMAN_KEYWORDS = Object.freeze(['用户', '老板', 'user', 'owner', 'human']);
+
+/* ------------------------------------------------------------------ *
+ * Normalization helpers
+ * ------------------------------------------------------------------ */
+
+/**
+ * Normalize a name for comparison. NFC first; ASCII lowercasing is applied
+ * separately by {@link foldAscii} so a Chinese alias is never case-folded into
+ * a different string.
+ * @param {string} value
+ * @returns {string}
+ */
+function normalizeName(value) {
+  return String(value ?? '').normalize('NFC').trim();
+}
+
+/**
+ * Case-insensitive fold for ASCII handles only.
+ * @param {string} value
+ * @returns {string}
+ */
+function foldAscii(value) {
+  return normalizeName(value).replace(/[A-Z]/g, (char) => char.toLowerCase());
+}
+
+/**
+ * Whether two names are the same member alias under the project's rules:
+ * exact match after NFC, or ASCII-case-insensitive match when both sides are
+ * pure ASCII.
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+function sameName(a, b) {
+  const left = normalizeName(a);
+  const right = normalizeName(b);
+  if (left === right) return true;
+  if (/^[\x20-\x7E]*$/.test(left) && /^[\x20-\x7E]*$/.test(right)) {
+    return foldAscii(left) === foldAscii(right);
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ *
+ * Body structure masking
+ * ------------------------------------------------------------------ */
+
+/**
+ * Mark every UTF-16 position of `body` that is inside a construct where an `@`
+ * must NOT trigger a mention: fenced code, inline code, blockquote lines, HTML
+ * tags, and the local part plus domain of an email address.
+ *
+ * Kept exported because both the UI preview and the tests assert on the exact
+ * masked set — "which characters were ignored" is a product-visible rule here.
+ *
+ * @param {string} body
+ * @returns {Uint8Array} 1 = masked (inert), 0 = live text.
+ */
+function maskBody(body) {
+  const text = String(body ?? '');
+  const masked = new Uint8Array(text.length);
+  const mask = (start, end) => {
+    for (let i = Math.max(0, start); i < Math.min(text.length, end); i += 1) masked[i] = 1;
+  };
+
+  // 1. Fenced code blocks. An unclosed fence masks to the end, matching what a
+  //    reader sees as "still code".
+  let fenceStart = -1;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const lineEnd = nextLineEnd(text, cursor);
+    const line = text.slice(cursor, lineEnd);
+    const fence = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (fenceStart < 0) {
+        fenceStart = cursor;
+      } else {
+        mask(fenceStart, lineEnd);
+        fenceStart = -1;
+      }
+    } else if (fenceStart >= 0) {
+      // Inside a fence: nothing on these lines is live text.
+      mask(cursor, lineEnd);
+    }
+    cursor = lineEnd + 1;
+  }
+  if (fenceStart >= 0) mask(fenceStart, text.length);
+
+  // 2. Inline code. Paired backticks of equal length, per CommonMark's simple
+  //    reading; an unmatched single backtick stays literal text.
+  const inline = /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g;
+  let inlineMatch;
+  while ((inlineMatch = inline.exec(text)) !== null) {
+    mask(inlineMatch.index, inlineMatch.index + inlineMatch[0].length);
+  }
+
+  // 3. Blockquote lines: `>` prefixed lines quote someone else's words.
+  cursor = 0;
+  while (cursor < text.length) {
+    const lineEnd = nextLineEnd(text, cursor);
+    if (/^\s{0,3}>/.test(text.slice(cursor, lineEnd))) mask(cursor, lineEnd);
+    cursor = lineEnd + 1;
+  }
+
+  // 4. HTML tags and autolinks `<...>`.
+  const tag = /<[^>\n]{0,400}>/g;
+  let tagMatch;
+  while ((tagMatch = tag.exec(text)) !== null) mask(tagMatch.index, tagMatch.index + tagMatch[0].length);
+
+  // 5. Link targets `](...)`, bare URLs, `mailto:` addresses, and the whole of
+  //    any email address (`local@domain`) — per the design notes rule 2.
+  const email = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+  let emailMatch;
+  while ((emailMatch = email.exec(text)) !== null) {
+    mask(emailMatch.index, emailMatch.index + emailMatch[0].length);
+  }
+  const linkTarget = /\]\(([^)\n]*)\)/g;
+  let linkMatch;
+  while ((linkMatch = linkTarget.exec(text)) !== null) {
+    mask(linkMatch.index, linkMatch.index + linkMatch[0].length);
+  }
+  const url = /\b(?:https?|mailto|file):\/?\/?[^\s<>()]+/gi;
+  let urlMatch;
+  while ((urlMatch = url.exec(text)) !== null) mask(urlMatch.index, urlMatch.index + urlMatch[0].length);
+
+  return masked;
+}
+
+/**
+ * End offset (exclusive) of the line starting at `start`, excluding the
+ * newline itself.
+ * @param {string} text
+ * @param {number} start
+ * @returns {number}
+ */
+function nextLineEnd(text, start) {
+  const found = text.indexOf('\n', start);
+  return found < 0 ? text.length : found;
+}
+
+/* ------------------------------------------------------------------ *
+ * Token extraction
+ * ------------------------------------------------------------------ */
+
+/**
+ * Find candidate `@name` tokens in free text, applying the structural and
+ * boundary rules. Resolution against a member list happens separately.
+ *
+ * @param {string} body
+ * @returns {ParsedAtToken[]}
+ */
+function extractAtTokens(body) {
+  const text = String(body ?? '');
+  if (!text.includes(AT_SIGN) && !text.includes(AT_SIGN_FULL_WIDTH)) return [];
+  const masked = maskBody(text);
+  /** @type {ParsedAtToken[]} */
+  const tokens = [];
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char !== AT_SIGN && char !== AT_SIGN_FULL_WIDTH) continue;
+    if (masked[i] === 1) continue;
+
+    // Rule 2: the `@` must begin a mention, not sit inside a word.
+    if (i > 0 && masked[i - 1] === 0 && !SPACE.test(text[i - 1]) && !BOUNDARY_BEFORE.has(text[i - 1])) continue;
+
+    // The `@` itself may be followed by whitespace when the user typed a chip
+    // separator; a name must still follow immediately after that whitespace.
+    let start = i + 1;
+    while (start < text.length && SPACE.test(text[start])) start += 1;
+    if (start >= text.length) continue;
+    if (masked[start] === 1) continue;
+
+    const bracketed = readBracketedName(text, start);
+    let end;
+    let name;
+    if (bracketed) {
+      end = bracketed.end;
+      name = bracketed.name;
+    } else {
+      end = start;
+      while (end < text.length && masked[end] === 0 && !TERMINATOR.has(text[end]) && !SPACE.test(text[end])) end += 1;
+      if (end === start) continue;
+      name = text.slice(start, end);
+    }
+    if (!name) continue;
+
+    tokens.push({
+      start: i,
+      end,
+      raw: text.slice(i, end),
+      name: normalizeName(name),
+      // Internal-only aids for {@link resolveMentions}; stripped from the wire.
+      nameStart: start,
+    });
+    i = end - 1;
+  }
+
+  return tokens;
+}
+
+/**
+ * Read `「...」`-style bracketed names, which are the only way to mention a
+ * member whose alias contains a space (the design notes rule 7).
+ * @param {string} text
+ * @param {number} start
+ * @returns {{ name: string, end: number } | null}
+ */
+function readBracketedName(text, start) {
+  for (const [open, close] of BRACKETS) {
+    if (text[start] !== open) continue;
+    const closeAt = text.indexOf(close, start + 1);
+    if (closeAt < 0) return null;
+    const name = text.slice(start + 1, closeAt);
+    if (!name.trim()) return null;
+    return { name, end: closeAt + 1 };
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Member index and resolution
+ * ------------------------------------------------------------------ */
+
+/**
+ * A resolved mention target set for one member table revision.
+ *
+ * Construct one per `(room, membershipRevision)`. The resolver refuses to mix
+ * revisions: `resolve()` takes the revision the caller believes is current and
+ * returns `stale: true` instead of guessing when they differ, which is what
+ * makes "renamed member keeps their old bound mentions" true in practice.
+ */
+class MentionResolver {
+  /**
+   * @param {object} input
+   * @param {RoomMember[]} input.members   Active members (human and agent).
+   * @param {number} [input.membershipRevision]
+   * @param {string[]} [input.tombstones]  Retired aliases that must not be reused.
+   * @param {string[]} [input.everyoneKeywords]
+   * @param {string[]} [input.humanKeywords]
+   */
+  constructor(input) {
+    const members = Array.isArray(input?.members) ? input.members : [];
+    /** @type {number} */
+    this.membershipRevision = Number.isFinite(input?.membershipRevision) ? input.membershipRevision : 0;
+    /** @type {string[]} */
+    this.tombstones = (input?.tombstones ?? []).map(normalizeName).filter(Boolean);
+    /** @type {Set<string>} */
+    this.everyoneKeywords = new Set((input?.everyoneKeywords ?? EVERYONE_KEYWORDS).map(foldAscii));
+    /** @type {Set<string>} */
+    this.humanKeywords = new Set((input?.humanKeywords ?? HUMAN_KEYWORDS).map(foldAscii));
+
+    /** @type {Map<string, RoomMember[]>} exact (NFC) key → members */
+    const exact = new Map();
+    /** @type {Map<string, RoomMember[]>} ASCII-folded key → members */
+    const folded = new Map();
+    const push = (map, key, member) => {
+      if (!key) return;
+      const list = map.get(key);
+      if (list) list.push(member);
+      else map.set(key, [member]);
+    };
+
+    for (const member of members) {
+      if (!member) continue;
+      const keys = [member.handle, member.displayName, ...(member.aliases ?? [])];
+      for (const key of keys) {
+        push(exact, normalizeName(key), member);
+        if (/^[\x20-\x7E]*$/.test(normalizeName(key))) push(folded, foldAscii(key), member);
+      }
+    }
+    /** @type {Map<string, RoomMember[]>} */
+    this.exact = exact;
+    /** @type {Map<string, RoomMember[]>} */
+    this.folded = folded;
+    /** @type {RoomMember[]} */
+    this.members = members;
+  }
+
+  /**
+   * All active agent members — the snapshot `@所有人` expands to.
+   * @returns {RoomMember[]}
+   */
+  activeAgents() {
+    return this.members.filter((member) => member.kind === 'agent' && member.status !== 'offline');
+  }
+
+  /**
+   * The human member the room speaks to, when one exists.
+   * @returns {RoomMember | undefined}
+   */
+  human() {
+    return this.members.find((member) => member.kind === 'human');
+  }
+
+  /**
+   * Resolve one token.
+   * @param {ParsedAtToken} token
+   * @returns {MentionResolution}
+   */
+  resolveToken(token) {
+    const name = normalizeName(token.name);
+    const folded = foldAscii(name);
+
+    if (this.everyoneKeywords.has(folded)) {
+      return {
+        token,
+        kind: 'everyone',
+        memberId: null,
+        candidates: this.activeAgents().map((member) => member.id),
+        reason: `所有人（${this.activeAgents().length} 位 AI 成员）`,
+      };
+    }
+
+    const exactHits = this.exact.get(name) ?? [];
+    const hits = exactHits.length > 0 ? exactHits : this.folded.get(folded) ?? [];
+    const unique = dedupeMembers(hits);
+
+    // §5.3 rule 12: a retired alias stays a tombstone. Resolving it to a
+    // *different* member would silently mis-deliver text the user wrote for
+    // someone who left, so a tombstoned name is inert by construction —
+    // reusing it is refused when an alias is registered, not un-tombstoned here.
+    if (this.tombstones.some((retired) => sameName(retired, name))) {
+      return {
+        token,
+        kind: 'unknown',
+        memberId: null,
+        candidates: [],
+        reason: `“${token.name}”是已退出成员的旧名，本条不会改投别人；请从成员列表选择新成员。`,
+      };
+    }
+
+    if (unique.length === 1) {
+      return { token, kind: 'member', memberId: unique[0].id, candidates: [], reason: '' };
+    }
+    if (unique.length > 1) {
+      return {
+        token,
+        kind: 'ambiguous',
+        memberId: null,
+        candidates: unique.map((member) => member.id),
+        reason: `“${token.name}”在本群对应 ${unique.length} 位成员，请选择要联系的人。`,
+      };
+    }
+
+    if (this.humanKeywords.has(folded) && this.human()) {
+      return { token, kind: 'member', memberId: this.human().id, candidates: [], reason: '' };
+    }
+
+    // Rule 8: a run that swallowed following text is reported as a hint rather
+    // than guessed at. `@前端你先看看` lands here.
+    const hint = this.boundaryHint(token);
+    return {
+      token,
+      kind: 'unknown',
+      memberId: null,
+      candidates: [],
+      reason: hint
+        ? `无法识别“${token.raw}”。如果要点名，请在名字后加空格或标点（例如 ${hint}）。`
+        : `无法识别“${token.raw}”，可以从成员列表选择，或按普通文本发送。`,
+    };
+  }
+
+  /**
+   * Suggest a resolvable prefix when a name run clearly starts with a real
+   * alias but continues into more text.
+   * @param {ParsedAtToken} token
+   * @returns {string | null}
+   */
+  boundaryHint(token) {
+    const name = normalizeName(token.name);
+    let best = null;
+    for (const [key, members] of this.exact) {
+      if (!key || key.length >= name.length) continue;
+      if (!name.startsWith(key)) continue;
+      if (dedupeMembers(members).length !== 1) continue;
+      if (best === null || key.length > best.length) best = key;
+    }
+    if (best === null) {
+      const folded = foldAscii(name);
+      for (const [key, members] of this.folded) {
+        if (!key || key.length >= folded.length) continue;
+        if (!folded.startsWith(key)) continue;
+        if (dedupeMembers(members).length !== 1) continue;
+        if (best === null || key.length > best.length) best = key;
+      }
+    }
+    return best === null ? null : `${AT_SIGN}${best}`;
+  }
+
+  /**
+   * Resolve a whole body into an ordered, duplicate-free resolution list.
+   * @param {string} body
+   * @param {{ membershipRevision?: number }} [options]
+   * @returns {{ resolutions: MentionResolution[], stale: boolean, unknownText: string[] }}
+   */
+  resolve(body, options) {
+    const stale =
+      Number.isFinite(options?.membershipRevision) && options.membershipRevision !== this.membershipRevision;
+    const tokens = extractAtTokens(body);
+    const resolutions = tokens.map((token) => this.resolveToken(token));
+    return {
+      resolutions,
+      stale,
+      unknownText: resolutions.filter((entry) => entry.kind === 'unknown').map((entry) => entry.token.raw),
+    };
+  }
+}
+
+/**
+ * Deduplicate members by identity — the same member reachable by handle,
+ * alias and display name is still one member.
+ * @param {RoomMember[]} members
+ * @returns {RoomMember[]}
+ */
+function dedupeMembers(members) {
+  const seen = new Set();
+  const out = [];
+  for (const member of members) {
+    if (!member || seen.has(member.id)) continue;
+    seen.add(member.id);
+    out.push(member);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * Merging structured chips with typed text
+ * ------------------------------------------------------------------ */
+
+/**
+ * Merge structured mentions (avatar menu / picker chips) with the text-parsed
+ * ones, then produce the final target set.
+ *
+ * Rules:
+ *   - Structured chips always win: they carry a `memberId` already validated
+ *     against this room, and a renamed member keeps receiving them.
+ *   - Text mentions are resolved; unknown/ambiguous ones are reported, never
+ *     silently dropped and never redirected.
+ *   - `@所有人` expands to the active-agent snapshot at send time.
+ *   - A member named twice (chip + text, or two spellings) yields ONE record.
+ *
+ * @param {object} input
+ * @param {string} input.body
+ * @param {Mention[]} [input.mentions]  Structured chips from the client.
+ * @param {MentionResolver} input.resolver
+ * @param {number} [input.membershipRevision]
+ * @returns {{
+ *   targets: Mention[],
+ *   unknownText: string[],
+ *   ambiguous: Array<{ raw: string, candidates: MemberId[], reason: string }>,
+ *   stale: boolean,
+ *   hints: string[],
+ * }}
+ */
+function mergeMentions(input) {
+  const body = String(input?.body ?? '');
+  const resolver = input.resolver;
+  const structured = Array.isArray(input?.mentions) ? input.mentions : [];
+  /** @type {Mention[]} */
+  const targets = [];
+  const seen = new Set();
+  /** @type {string[]} */
+  const unknownText = [];
+  /** @type {Array<{ raw: string, candidates: MemberId[], reason: string }>} */
+  const ambiguous = [];
+  /** @type {string[]} */
+  const hints = [];
+
+  const add = (mention) => {
+    if (!mention?.targetMemberId || seen.has(mention.targetMemberId)) return;
+    seen.add(mention.targetMemberId);
+    targets.push(mention);
+  };
+
+  // 1. Structured chips first: they are already server-validated identities.
+  for (const chip of structured) {
+    add({
+      targetMemberId: String(chip.targetMemberId),
+      origin: chip.origin === 'avatar' || chip.origin === 'picker' ? chip.origin : 'picker',
+      displaySnapshot: String(chip.displaySnapshot ?? ''),
+      span: chip.span ?? null,
+    });
+  }
+
+  // 2. Typed text.
+  const { resolutions, stale } = resolver.resolve(body, {
+    membershipRevision: input?.membershipRevision,
+  });
+  for (const resolution of resolutions) {
+    if (resolution.kind === 'member' && resolution.memberId) {
+      // A member already present as a structured chip stays once.
+      if (seen.has(resolution.memberId)) continue;
+      add({
+        targetMemberId: resolution.memberId,
+        origin: 'typed',
+        displaySnapshot: resolution.token.name,
+        span: { start: resolution.token.start, end: resolution.token.end },
+      });
+      continue;
+    }
+    if (resolution.kind === 'everyone') {
+      for (const memberId of resolution.candidates) {
+        add({ targetMemberId: memberId, origin: 'typed', displaySnapshot: '所有人', span: null });
+      }
+      continue;
+    }
+    if (resolution.kind === 'ambiguous') {
+      ambiguous.push({
+        raw: resolution.token.raw,
+        candidates: resolution.candidates,
+        reason: resolution.reason,
+      });
+      continue;
+    }
+    unknownText.push(resolution.token.raw);
+    if (resolution.reason.includes('加空格')) hints.push(resolution.reason);
+  }
+
+  return { targets, unknownText, ambiguous, stale: Boolean(stale), hints };
+}
+
+/**
+ * Render a body with mention spans for display: returns segments so the UI can
+ * highlight exactly the ranges the server resolved, without re-parsing.
+ * @param {string} body
+ * @param {Mention[]} mentions
+ * @returns {Array<{ text: string, mention: Mention | null }>}
+ */
+function segmentsForDisplay(body, mentions) {
+  const text = String(body ?? '');
+  const spans = (mentions ?? [])
+    .filter((mention) => mention?.span && Number.isFinite(mention.span.start) && Number.isFinite(mention.span.end))
+    .map((mention) => ({ ...mention.span, mention }))
+    .sort((a, b) => a.start - b.start);
+  if (spans.length === 0) return text ? [{ text, mention: null }] : [];
+  /** @type {Array<{ text: string, mention: Mention | null }>} */
+  const out = [];
+  let cursor = 0;
+  for (const span of spans) {
+    const start = Math.max(cursor, Math.min(span.start, text.length));
+    const end = Math.max(start, Math.min(span.end, text.length));
+    if (start > cursor) out.push({ text: text.slice(cursor, start), mention: null });
+    out.push({ text: text.slice(start, end), mention: span.mention });
+    cursor = end;
+  }
+  if (cursor < text.length) out.push({ text: text.slice(cursor), mention: null });
+  return out;
+}
+
+/**
+ * Strip the mention syntax from a body for a compact display label, e.g. the
+ * sidebar preview line.
+ * @param {string} body
+ * @returns {string}
+ */
+function stripMentionSyntax(body) {
+  const text = String(body ?? '');
+  const tokens = extractAtTokens(text);
+  if (tokens.length === 0) return text;
+  let out = '';
+  let cursor = 0;
+  for (const token of tokens) {
+    out += text.slice(cursor, token.start);
+    cursor = token.end;
+  }
+  out += text.slice(cursor);
+  return out.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * @typedef {import('./contracts.js').RoomMember} RoomMember
+ * @typedef {import('./contracts.js').MemberId} MemberId
+ * @typedef {import('./contracts.js').Mention} Mention
+ * @typedef {import('./contracts.js').ParsedAtToken} ParsedAtToken
+ * @typedef {import('./contracts.js').MentionResolution} MentionResolution
+ */
+
+const V = { ROUTE, ROLE_TEMPLATES, DELIVERY_LABELS, TASK_STATUS_LABELS, MEMBER_STATUS_LABELS, ERROR_LABELS, roleTemplate, deliveryLabel, taskLabel, memberLabel };
+const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSyntax, extractAtTokens, maskBody };
+/* <<< GENERATED: shared rules <<< */
+
+    // The generated section declares the shared rule names directly in this
+    // factory's scope (ROUTE, ROLE_TEMPLATES, roleTemplate, MentionResolver, …), so
+    // there is nothing to unpack — re-declaring them here would be a SyntaxError.
+    // `V` and `M` are thin views for the code below that reads them namespaced.
 
     /** Class-name prefix, unique to this plugin. */
     const P = 'dpr_';

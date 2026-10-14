@@ -1,172 +1,140 @@
 /**
- * Generates the browser halves of the shared modules.
+ * Generates the browser half's shared-rule section.
  *
  * The mention parser MUST be identical on both sides — the design notes rule 11 says
  * preview and server use one library and one rule version. The browser half is a
- * classic script with no bundler and a closed module table, so it cannot import
- * the ESM source directly. Duplicating the file by hand would guarantee drift;
- * this small generator instead emits a chunk from the single source of truth on
- * every `npm run build`, and `npm run check` fails if the output is stale.
+ * classic script whose module table is CLOSED: `require.async` cannot fetch a
+ * package-local chunk that is not a boot-graph row, so registering extra chunks
+ * fails the bundle purity gate and the whole page reports "Failed to load
+ * plugins". That failure was observed in a real host, which is why this generator
+ * INLINES `shared/*.js` into `client.js` between two markers instead:
  *
- * What it does, in order, per module:
- *   1. strips the `import … from './x.js'` lines and rewrites them into
- *      destructuring from the `__deps` parameter the chunk factory receives;
- *   2. replaces the `export ` keyword on declarations;
- *   3. returns an explicit export map, so a forgotten export is a build error
- *      rather than a `undefined` at runtime;
- *   4. wraps everything in the `window.__ModuleLoader__.load({...})` form the
- *      client module system expects, with a banner marking it generated.
+ *   - dependencies are ordered by a topological sort of the relative imports;
+ *   - `import … from './x.js'` statements are dropped, because the inlined modules
+ *     share one flat scope;
+ *   - the `export ` keyword is stripped, and a duplicate top-level name is a build
+ *     error rather than a silent shadow;
+ *   - an explicit export map is emitted, so a renamed or deleted definition fails
+ *     the build instead of becoming an `undefined` at runtime.
+ *
+ * The result: `client.js` stays ONE classic script with no extra requests, and
+ * editing `shared/` without rebuilding is caught by `npm run check`.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const CLIENT = join(ROOT, 'client.js');
+const BEGIN = '/* >>> GENERATED: shared rules (scripts/build-client.mjs) >>> */';
+const END = '/* <<< GENERATED: shared rules <<< */';
 
-/** One generated chunk: source module, output file, chunk name, and its deps. */
-const TARGETS = [
-  {
-    source: 'shared/vocabulary.js',
-    output: 'client.vocabulary.js',
-    chunk: 'vocabulary',
-    deps: [],
-    exports: [
-      'AT_SIGN',
-      'AT_SIGN_FULL_WIDTH',
-      'ROUTE',
-      'ENVELOPE_PROTOCOL',
-      'TIME_FORMAT',
-      'ACTION_PREFIX',
-      'DELIVERY_LABELS',
-      'TASK_STATUS_LABELS',
-      'TASK_TRANSITIONS',
-      'MEMBER_STATUS_LABELS',
-      'ROLE_TEMPLATES',
-      'ERROR_LABELS',
-      'roleTemplate',
-      'canTransition',
-      'isoTimestamp',
-      'deliveryLabel',
-      'taskLabel',
-      'memberLabel',
-    ],
-  },
-  {
-    source: 'shared/mention-resolver.js',
-    output: 'client.mention-resolver.js',
-    chunk: 'mention-resolver',
-    deps: [{ chunk: 'vocabulary', from: './vocabulary.js', names: ['AT_SIGN', 'AT_SIGN_FULL_WIDTH'] }],
-    exports: [
-      'EVERYONE_KEYWORDS',
-      'HUMAN_KEYWORDS',
-      'normalizeName',
-      'foldAscii',
-      'sameName',
-      'maskBody',
-      'extractAtTokens',
-      'MentionResolver',
-      'mergeMentions',
-      'segmentsForDisplay',
-      'stripMentionSyntax',
-    ],
-  },
-];
+/** Modules to inline, entry points last. */
+const MODULES = ['shared/vocabulary.js', 'shared/mention-resolver.js'];
+
+/** Names the client half consumes, grouped as the client names them. */
+const EXPORTS = {
+  V: [
+    'ROUTE',
+    'ROLE_TEMPLATES',
+    'DELIVERY_LABELS',
+    'TASK_STATUS_LABELS',
+    'MEMBER_STATUS_LABELS',
+    'ERROR_LABELS',
+    'roleTemplate',
+    'deliveryLabel',
+    'taskLabel',
+    'memberLabel',
+  ],
+  M: ['MentionResolver', 'mergeMentions', 'segmentsForDisplay', 'stripMentionSyntax', 'extractAtTokens', 'maskBody'],
+};
 
 /**
- * Rewrite one ESM module into a chunk factory body.
- * @param {object} target
- * @returns {string}
+ * Resolve the modules in dependency order.
+ * @returns {Array<{ file: string, source: string }>}
  */
-function generate(target) {
-  const file = join(ROOT, target.source);
-  let text = readFileSync(file, 'utf8');
+function orderedModules() {
+  const sources = new Map();
+  for (const relativePath of MODULES) sources.set(relativePath, readFileSync(join(ROOT, relativePath), 'utf8'));
 
-  const importLines = [...text.matchAll(/^import\s+[^;]+;$/gm)];
-  const imports = importLines.map((match) => {
-    const names = /import\s+\{([^}]+)\}/.exec(match[0]);
-    if (!names) throw new Error(`${target.source}: only named imports are supported (${match[0]})`);
-    return names[1]
-      .split(',')
-      .map((name) => name.trim())
-      .filter(Boolean)
-      .join(', ');
-  });
-  text = text.replace(/^import\s+[^;]+;$/gm, '');
+  /** @type {Array<{ file: string, source: string }>} */
+  const order = [];
+  const seen = new Set();
 
-  const declaredImports = new Set(target.deps.flatMap((dependency) => dependency.names));
-  for (const importNames of imports) {
-    for (const name of importNames.split(',').map((entry) => entry.trim())) {
-      if (!declaredImports.has(name)) {
-        throw new Error(`${target.source}: imports ${name}, which is not declared in the generator's deps`);
-      }
+  const visit = (modulePath, chain) => {
+    if (seen.has(modulePath)) return;
+    if (chain.includes(modulePath)) throw new Error(`shared module cycle: ${[...chain, modulePath].join(' -> ')}`);
+    const source = sources.get(modulePath);
+    if (source === undefined) throw new Error(`unknown shared module: ${modulePath}`);
+    for (const match of source.matchAll(/^import\s+[^;]*from\s+'(\.[^']+)';$/gm)) {
+      const dependency = relative(ROOT, resolve(join(ROOT, modulePath), '..', match[1])).replace(/\\/g, '/');
+      if (!sources.has(dependency)) throw new Error(`${modulePath} imports ${match[1]}, which is not listed in MODULES`);
+      visit(dependency, [...chain, modulePath]);
     }
-  }
+    seen.add(modulePath);
+    order.push({ file: modulePath, source });
+  };
 
-  text = text.replace(/^export\s+(?=(const|let|var|function|class|async))/gm, '');
-  if (/^\s*export\s/m.test(text)) {
-    throw new Error(`${target.source}: an export form this generator does not handle is still present`);
-  }
-
-  for (const name of target.exports) {
-    const declared =
-      new RegExp(`^(const|let|var|function|class)\\s+${name}\\b`, 'm').test(text) ||
-      new RegExp(`^\\s*${name}\\s*[:,]`, 'm').test(text);
-    if (!declared) throw new Error(`${target.source}: declared export ${name} was not found`);
-  }
-
-  const banner =
-    `/**\n` +
-    ` * GENERATED FILE — do not edit.\n` +
-    ` *\n` +
-    ` * Browser half of ${target.source}, emitted by scripts/build-client.mjs so\n` +
-    ` * both halves run the same rules (the design notes rule 11). Edit the source module\n` +
-    ` * and run \`node scripts/build-client.mjs\`.\n` +
-    ` */\n`;
-
-  return (
-    banner +
-    `window.__ModuleLoader__.load({\n` +
-    `  id: 'dsh-project-room#${target.chunk}',\n` +
-    `  chunk: '${target.output}',\n` +
-    `  factory: (require) => {\n` +
-    `    const module = { exports: {} };\n` +
-    `    const exports = module.exports;\n` +
-    `    Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });\n\n` +
-    `    const __deps = { ${target.deps.map((dependency) => `...require('dsh-project-room#${dependency.chunk}')`).join(', ')} };\n` +
-    (imports.length > 0 ? `    const { ${imports.join(', ')} } = __deps;\n` : '') +
-    `\n` +
-    `${text.trim()}\n\n` +
-    `    module.exports = { ${target.exports.join(', ')} };\n` +
-    `    return module.exports;\n` +
-    `  },\n` +
-    `});\n`
-  );
+  for (const modulePath of MODULES) visit(modulePath, []);
+  return order;
 }
 
-let changed = 0;
-for (const target of TARGETS) {
-  const output = join(ROOT, target.output);
-  const next = generate(target);
-  let current = '';
-  try {
-    current = readFileSync(output, 'utf8');
-  } catch {
-    current = '';
+/** Build the generated section body. */
+function generate() {
+  const parts = [
+    BEGIN,
+    '// Inlined from shared/ so the browser half is ONE classic script. The client module',
+    '// table is closed, so a package-local chunk cannot be fetched at runtime.',
+  ];
+  const declared = new Map();
+
+  for (const { file, source } of orderedModules()) {
+    let text = source;
+    // A relative import is already satisfied by the shared scope; drop it.
+    text = text.replace(/^import\s+[^;]*from\s+'\.[^']+';$/gm, '');
+    if (/^import\s/m.test(text)) throw new Error(`${file}: an import form this generator does not handle`);
+
+    for (const match of text.matchAll(/^export\s+(?:const|let|var|function|class)\s+([A-Za-z0-9_$]+)/gm)) {
+      if (declared.has(match[1])) {
+        throw new Error(`${file}: "${match[1]}" is already declared by ${declared.get(match[1])} in the shared scope`);
+      }
+      declared.set(match[1], file);
+    }
+    text = text.replace(/^export\s+(?=(?:const|let|var|function|class|async))/gm, '');
+    if (/^\s*export\s/m.test(text)) throw new Error(`${file}: an export form this generator does not handle`);
+
+    parts.push(`// ---- ${file} ----`);
+    parts.push(text.trim());
+    parts.push('');
   }
-  if (current === next) {
-    process.stdout.write(`· ${target.output} up to date\n`);
-    continue;
+
+  for (const [group, names] of Object.entries(EXPORTS)) {
+    const missing = names.filter((name) => !declared.has(name));
+    if (missing.length > 0) throw new Error(`${group}: ${missing.join(', ')} not found in the inlined shared scope`);
   }
-  if (process.argv.includes('--check')) {
-    process.stderr.write(`✖ ${target.output} is stale; run \`node scripts/build-client.mjs\`\n`);
-    changed += 1;
-    continue;
-  }
-  writeFileSync(output, next, 'utf8');
-  changed += 1;
-  process.stdout.write(`✔ ${target.output} written\n`);
+
+  parts.push(`const V = { ${EXPORTS.V.join(', ')} };`);
+  parts.push(`const M = { ${EXPORTS.M.join(', ')} };`);
+  parts.push(END);
+  return parts.join('\n');
 }
 
-if (process.argv.includes('--check') && changed > 0) process.exit(1);
-process.stdout.write(`${changed} file(s) ${process.argv.includes('--check') ? 'stale' : 'updated'}.\n`);
+const client = readFileSync(CLIENT, 'utf8');
+const begin = client.indexOf(BEGIN);
+const end = client.indexOf(END);
+if (begin < 0 || end < 0 || end < begin) {
+  throw new Error(`client.js is missing the generated markers:\n  ${BEGIN}\n  ${END}`);
+}
+
+const next = client.slice(0, begin) + generate() + client.slice(end + END.length);
+if (next === client) {
+  process.stdout.write('· client.js shared section is up to date\n');
+  process.exit(0);
+}
+if (process.argv.includes('--check')) {
+  process.stderr.write('✖ client.js shared section is stale; run `node scripts/build-client.mjs`\n');
+  process.exit(1);
+}
+writeFileSync(CLIENT, next, 'utf8');
+process.stdout.write('✔ client.js shared section regenerated\n');
