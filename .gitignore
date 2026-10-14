@@ -1,0 +1,17 @@
+# Build and dependency noise
+node_modules/
+*.tsbuildinfo
+
+# Local runtime data: room databases, backups, probe reports
+.project-room-data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+_probe/probe-report.json
+
+# Scratch and editor noise
+.tmp/
+*.log
+.DS_Store
+Thumbs.db

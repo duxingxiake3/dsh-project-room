@@ -1,0 +1,3 @@
+- insert:
+    - id: project-room-probe
+      name: 'dsh-project-room-probe'

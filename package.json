@@ -1,0 +1,73 @@
+{
+  "name": "dsh-project-room",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Project Room — a persistent project group chat for DeepSeek Harness: one room per project, a coordinator agent plus specialist members, equal two-way @ communication, per-member models, and real task/acceptance flow.",
+  "license": "MIT",
+  "icon": "./assets/icon.svg",
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "multi-agent",
+    "group-chat",
+    "project-room"
+  ],
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./shared/*": "./shared/*"
+  },
+  "files": [
+    "host.js",
+    "client.js",
+    "client.*.js",
+    "src/",
+    "shared/",
+    "assets/",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "notes/"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test \"tests/unit/*.test.js\" \"tests/integration/*.test.js\"",
+    "check": "node scripts/build-client.mjs --check && node scripts/check-syntax.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-agent-loop": "*",
+    "@deepseek-ai/dsh-client-modules": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-web": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent": { "optional": true },
+    "@deepseek-ai/dsh-agent-loop": { "optional": true },
+    "@deepseek-ai/dsh-client-modules": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-session": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/dsh-web": { "optional": true }
+  },
+  "engines": {
+    "dsh": ">=0.1.7-rc.1 <0.2.0",
+    "node": ">=22.5.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": false,
+      "inject": []
+    }
+  }
+}
