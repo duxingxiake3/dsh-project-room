@@ -130,12 +130,16 @@ export class TurnObserver {
       const member = members().get(session?.id);
       if (!member || member.kind !== 'agent') return;
       const state = this.#state(member.id);
+      // The listener receives the log envelope `{ type, seq, time, data }`; every
+      // field below lives in `data`. Reading the top level silently produced nothing.
+      const payload = unwrapSessionEvent(event);
 
       if (event.type === 'user/message') {
-        const parsed = parseRelayId(event.id);
+        const hostMessageId = payload.id ?? event.id;
+        const parsed = parseRelayId(hostMessageId);
         if (parsed && parsed.recipientId === member.id) {
           if (!state.consumed.includes(parsed.messageId)) state.consumed.push(parsed.messageId);
-          this.delivery.observeClaimed({ memberId: member.id, hostMessageId: event.id });
+          this.delivery.observeClaimed({ memberId: member.id, hostMessageId });
           this.#markSeen(member.id, parsed.messageId);
         }
         return;
@@ -143,13 +147,40 @@ export class TurnObserver {
 
       if (event.type === 'assistant/message') {
         // Keep only the newest assistant text of this turn; the durable event id
-        // makes the publication idempotent across a reload.
-        state.lastAssistant = { text: extractText(event.content), eventId: event.id };
+        // makes the publication idempotent across a reload. When no block list can be
+        // found at all, the raw shape is recorded instead of an empty reply: "the
+        // agent said nothing" and "we failed to read what it said" must never be the
+        // same observation.
+        const envelope = readAssistantEnvelope(event);
+        state.lastAssistant = {
+          text: extractText(envelope.content),
+          eventId: envelope.id,
+          blockTypes: [...new Set(envelope.content.map((block) => block?.type ?? '(none)'))],
+          shape: envelope.content.length === 0 ? describeEventShape(event) : null,
+        };
         return;
       }
 
       if (event.type === 'turn/end') {
-        state.turn = event.turn ?? state.turn;
+        state.turn = payload.turn ?? state.turn;
+        // A room-driven turn that closes badly must leave a durable mark. Otherwise
+        // "the agent never answered" and "the plugin lost the answer" are
+        // indistinguishable from the group, which is the failure mode this whole
+        // observer exists to prevent.
+        const reason = payload.reason?.kind ?? 'unknown';
+        if (reason !== 'completed' && state.consumed.length > 0) {
+          this.store.appendEvent({
+            roomId: member.roomId,
+            eventType: 'member.turn.ended',
+            payload: {
+              memberId: member.id,
+              turn: payload.turn ?? null,
+              reason,
+              failure: payload.reason?.failure?.message ?? null,
+              consumed: [...state.consumed],
+            },
+          });
+        }
         void this.flush(member.id).catch((error) => {
           this.logger?.warn?.(`[project-room] final reply publish failed for ${member.id}: ${error?.message ?? error}`);
         });
@@ -187,7 +218,36 @@ export class TurnObserver {
     state.consumed = [];
     state.lastAssistant = null;
 
-    if (consumed.length === 0 || !assistant?.text?.trim()) return null;
+    if (consumed.length === 0 || !assistant?.text?.trim()) {
+      // Record WHY nothing was published, on the occasions where something was
+      // expected. Without this the plugin is indistinguishable from broken: a turn
+      // that ran and produced only tool calls looks exactly like a turn whose reply
+      // was lost, and neither leaves a trace. The two reasons are different facts and
+      // are named differently (the design notes, §10.3).
+      if (consumed.length > 0) {
+        this.store.appendEvent({
+          roomId: member.roomId,
+          eventType: 'member.final-reply.skipped',
+          payload: {
+            memberId,
+            consumed,
+            reason: assistant?.text?.trim() ? 'no-assistant-message' : 'assistant-message-had-no-text',
+            // The block kinds the model actually produced. Without them, "the agent
+            // said nothing" cannot be told apart from "the plugin failed to read what
+            // it said" — and that ambiguity already cost hours once.
+            blockTypes: assistant?.blockTypes ?? [],
+            // Present only when the block list came back empty: the raw event shape,
+            // so a version difference in the durable format is visible instead of
+            // looking like an agent that chose to say nothing.
+            eventShape: assistant?.shape ?? null,
+            note: assistant
+              ? `这一轮的助手消息只有这些块：${(assistant.blockTypes ?? []).join(', ') || '(空)'}；没有可直接发布的正文。`
+              : '这一轮没有产生任何助手消息（可能只做了工具调用，或请求失败）。',
+          },
+        });
+      }
+      return null;
+    }
 
     state.publishing = true;
     try {
@@ -234,6 +294,28 @@ export class TurnObserver {
   }
 
   /**
+   * Why the room-driven turns of this room produced nothing visible, newest first.
+   *
+   * Read by the panel so "the agent is silent" always has a stated reason attached
+   * rather than being left for the user to guess at.
+   *
+   * @param {string} roomId
+   * @param {number} [limit]
+   * @returns {Array<{ seq: number, eventType: string, payload: object, createdAt: string }>}
+   */
+  diagnostics(roomId, limit = 20) {
+    const wanted = new Set(['member.final-reply.skipped', 'member.turn.ended', 'member.final-reply.published', 'delivery.failed', 'delivery.reconciled', 'loop.paused']);
+    try {
+      return this.store.listRoomEvents
+        ? this.store.listRoomEvents(roomId, { limit, eventTypes: [...wanted] }).reverse()
+        : [];
+    } catch (error) {
+      this.logger?.warn?.(`[project-room] diagnostics unavailable for ${roomId}: ${error?.message ?? error}`);
+      return [];
+    }
+  }
+
+  /**
    * Release every listener this observer registered. Called on plugin unload so
    * no callback outlives the fiber that owns it (the design notes).
    */
@@ -247,6 +329,72 @@ export class TurnObserver {
     }
     this.turns.clear();
   }
+}
+
+/**
+ * Unwrap a durable session event.
+ *
+ * A `session/event` listener receives the LOG ENVELOPE, not the bare payload:
+ *
+ *   { type, seq, time, data: { …payload… }, surfaceOp? }
+ *
+ * so `assistant/message` puts the message at `event.data.message`, and `turn/end`
+ * puts `turn`/`reason` at `event.data.turn` / `event.data.reason`. Reading the
+ * top level yields `undefined` for every field — which is exactly how every member's
+ * answer was discarded while the plugin reported nothing wrong. Recorded from a real
+ * activation (`eventShape` on `member.final-reply.skipped`).
+ *
+ * The bare payload is accepted too, so one shape change cannot bring the failure back.
+ *
+ * @param {object} event
+ * @returns {object} the payload
+ */
+export function unwrapSessionEvent(event) {
+  if (event && typeof event === 'object' && event.data && typeof event.data === 'object' && typeof event.type === 'string') {
+    return event.data;
+  }
+  return event ?? {};
+}
+
+/**
+ * Describe an event's shape for diagnosis: the top-level keys, and the key names of
+ * anything that looks like it might hold the message.
+ *
+ * Bounded and free of content: this lands in the room's own event log, and a
+ * diagnostic must never leak a prompt or an answer.
+ *
+ * @param {object} event
+ * @returns {object}
+ */
+function describeEventShape(event) {
+  const keys = Object.keys(event ?? {}).slice(0, 20);
+  const shape = { keys };
+  for (const key of ['data', 'message', 'payload']) {
+    const value = event?.[key];
+    if (value && typeof value === 'object') {
+      shape[key] = { keys: Object.keys(value).slice(0, 20), contentType: Array.isArray(value.content) ? 'array' : typeof value.content };
+    }
+  }
+  return shape;
+}
+
+/**
+ * Read the assistant message out of a durable `assistant/message` event.
+ *
+ * Accepts the envelope (`event.data.message`), a bare payload (`event.message`), or
+ * a message-shaped event (`event.content`). Tolerating all three costs two property
+ * checks and removes an entire class of "the reply vanished" bug.
+ *
+ * @param {object} event
+ * @returns {{ id: string | undefined, content: Array<{ type: string, text?: string }> }}
+ */
+export function readAssistantEnvelope(event) {
+  const payload = unwrapSessionEvent(event);
+  const message = payload.message ?? payload;
+  return {
+    id: message?.id ?? payload.id ?? event?.id,
+    content: Array.isArray(message?.content) ? message.content : [],
+  };
 }
 
 /**

@@ -925,6 +925,38 @@ export class RoomStore {
   }
 
   /**
+   * Room events, newest last, optionally filtered by type.
+   *
+   * The event log is the plugin's own account of what it did — deliveries accepted,
+   * decisions adopted, turns that ended without a visible reply. It is read by the
+   * diagnostics surface so silence always carries a reason (the design notes).
+   *
+   * @param {string} roomId
+   * @param {{ limit?: number, eventTypes?: string[] }} [options]
+   * @returns {Array<{ seq: number, eventType: string, payload: object, createdAt: string }>}
+   */
+  listRoomEvents(roomId, options = {}) {
+    const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(500, options.limit)) : 100;
+    const clauses = ['room_id = ?'];
+    const values = [roomId];
+    if (Array.isArray(options.eventTypes) && options.eventTypes.length > 0) {
+      clauses.push(`event_type in (${options.eventTypes.map(() => '?').join(', ')})`);
+      values.push(...options.eventTypes);
+    }
+    values.push(limit);
+    return this.#db()
+      .prepare(`select seq, event_type, payload, created_at from room_event where ${clauses.join(' and ')} order by seq desc limit ?`)
+      .all(...values)
+      .map((row) => ({
+        seq: row.seq,
+        eventType: row.event_type,
+        payload: parseJson(row.payload, {}),
+        createdAt: row.created_at,
+      }))
+      .reverse();
+  }
+
+  /**
    * Messages after a cursor, oldest first.
    * @param {string} roomId
    * @param {{ afterSeq?: number, limit?: number, threadId?: string, taskId?: string }} [options]

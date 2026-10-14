@@ -170,6 +170,10 @@ export function registerRoomRoute(services) {
           capabilities,
           recovery: recovery.inspect(payload.roomId),
           loopIncidents: guard.listIncidents().filter((incident) => incident.roomId === payload.roomId),
+          // Why a room-driven turn produced no visible reply. Without this the group
+          // cannot tell "the model returned nothing" from "the plugin lost the
+          // answer", and both look like silence.
+          diagnostics: observer.diagnostics(payload.roomId),
           workspace: {
             isolation: workspace.isolationFor(payload.roomId),
             snapshot: workspace.snapshotPlan(payload.roomId),
