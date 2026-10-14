@@ -30,7 +30,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
-    "notes/"
+    "notes/",
+    "development checkpoint"
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs",

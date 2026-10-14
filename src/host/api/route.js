@@ -121,11 +121,33 @@ export function registerRoomRoute(services) {
           threadId: payload.threadId ?? null,
           taskId: payload.taskId ?? null,
         });
+        // Resolve each member's EFFECTIVE model through the precedence chain rather
+        // than reading `modelProfileRef` directly. A member created without a pinned
+        // model stores `null` there while really running on the role/project/host
+        // default, so the raw column reports "未配置" for a member that is in fact
+        // fully routed — exactly the kind of claim this plugin must not make.
+        const resolved = await Promise.all(
+          snapshot.members.map(async (member) => {
+            if (member.kind !== 'agent') return { member, effective: null };
+            const effective = await models.effectiveFor(member);
+            return {
+              member,
+              effective: {
+                ...effective,
+                profile: effective.profile ?? (effective.profileRef ? store.getModelProfile(effective.profileRef) : null),
+              },
+            };
+          }),
+        );
         return {
           ...snapshot,
-          members: snapshot.members.map((member) => ({
+          members: resolved.map(({ member, effective }) => ({
             ...context.memberView(member),
-            effectiveModel: store.getModelProfile(member.modelProfileRef),
+            // What is actually in effect, and who chose it. `pinnedProfileRef` stays
+            // the raw column so the panel can tell "you pinned this" from "inherited".
+            pinnedProfileRef: member.modelProfileRef,
+            effectiveModel: effective?.profile ?? null,
+            selectionSource: effective ? effective.source : member.selectionSource,
           })),
           board: rooms.board(payload.roomId),
           models: (await models.listProfiles()).map((profile) => ({

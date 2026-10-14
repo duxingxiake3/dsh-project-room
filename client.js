@@ -2034,10 +2034,20 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
               jsx('span', { className: `${P}label`, children: '模型（真实已接入的提供方/模型ID）' }),
               jsx('select', {
                 className: `${P}select`,
-                value: pending ?? member.modelProfileRef ?? '',
+                value: pending ?? member.pinnedProfileRef ?? '',
                 onChange: (event) => setPending(event.target.value),
                 children: [
-                  jsx('option', { value: '', children: '未配置（使用角色/项目默认）' }),
+                  // An unpinned member is NOT unconfigured: it inherits the role, project
+                  // or host default. Naming the inherited model here is the difference
+                  // between "we don't know what this runs on" and the truth.
+                  jsx('option', {
+                    value: '',
+                    children: member.pinnedProfileRef
+                      ? '取消固定（回到角色/项目默认）'
+                      : member.effectiveModel
+                        ? `未固定 — 当前继承：${member.effectiveModel.providerRoute}/${member.effectiveModel.modelId}${selectionSourceLabel(member.selectionSource)}`
+                        : '未配置（使用角色/项目默认）',
+                  }),
                   ...options.map((profile) => jsx('option', { value: profile.profileRef, children: `${profile.label} — ${profile.providerRoute}/${profile.modelId}${profile.capabilityStatus === 'unverified' ? '（能力待验证）' : ''}` })),
                 ],
               }),
