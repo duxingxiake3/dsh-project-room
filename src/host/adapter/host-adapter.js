@@ -92,10 +92,23 @@ export class HostAdapter {
    * @param {import('@deepseek-ai/cordis').Context} input.ctx  Plugin context; owns every agent it creates.
    * @param {object} [input.logger]
    * @param {(invocation: object) => void} [input.onUsage]  Sink for real token usage per member call.
+   * @param {string} [input.agentPreset]  Preset to mount on resume when a session recorded none.
    */
   constructor(input) {
     this.ctx = input.ctx;
     this.logger = input.logger ?? input.ctx?.logger ?? null;
+    /**
+     * The deployment's configured preset.
+     *
+     * Carried on the adapter rather than threaded through every caller because
+     * recovery resumes members through its own path (it knows nothing about
+     * presets), and a session created before the option existed records none. That
+     * combination is exactly how a restart silently costs existing rooms their
+     * tools: measured, after the 13:14 restart, a pre-fix room's coordinator still
+     * listed 15 room tools and no `pwsh`.
+     * @type {string | undefined}
+     */
+    this.defaultAgentPreset = input.agentPreset;
     /** @type {Map<string, { handle: object, modelRef: { current: object | null } }>} */
     this.members = new Map();
     /** @type {Set<(event: object) => void>} */
@@ -463,7 +476,7 @@ export class HostAdapter {
         //
         // A failure is reported, not thrown: one unusable preset must not make
         // recovery fail for every room in the database.
-        const recorded = agent?.session?.header?.agentPreset ?? input.agentPreset;
+        const recorded = agent?.session?.header?.agentPreset ?? input.agentPreset ?? this.defaultAgentPreset;
         if (recorded !== undefined) {
           try {
             await adapter.#mountPreset(agentCtx, recorded, input.memberId);

@@ -124,7 +124,11 @@ function fakeHost(options = {}) {
     },
   };
 
-  const adapter = new HostAdapter({ ctx, logger: ctx.logger });
+  const adapter = new HostAdapter({
+    ctx,
+    logger: ctx.logger,
+    ...(options.presetDefault === undefined ? {} : { agentPreset: options.presetDefault }),
+  });
   adapter.onEvent((event) => events.push(event));
 
   return { adapter, created, restrictCalls, exposed, presetCalls, events };
@@ -246,6 +250,17 @@ describe('member agent presets', () => {
     });
 
     assert.deepEqual(host.presetCalls.mount, ['standard'], 'pre-fix sessions must be upgradable');
+  });
+
+  it('falls back to the adapter’s configured preset when the caller names none', async () => {
+    // Recovery resumes through its own path and passes no preset; a session created
+    // before the option existed records none either. Both fallbacks must reach the
+    // adapter's default, or a restart silently costs existing rooms their tools.
+    const host = fakeHost({ resumeHeader: {}, presetDefault: 'standard', mountAddsTools: ['pwsh'] });
+
+    await host.adapter.resumeMember({ ...baseMember, memberId: 'member_a', sessionId: 'session_a' });
+
+    assert.deepEqual(host.presetCalls.mount, ['standard'], 'the deployment default must be used');
   });
 
   it('reports, rather than throws, when a resumed preset cannot be mounted', async () => {

@@ -48,6 +48,7 @@ import { ArtifactService } from './workspace/artifact-service.js';
 import { registerRoomRoute } from './api/route.js';
 import { RecoveryService } from './recovery/recovery-service.js';
 import { ReminderService } from './reminders/reminder-service.js';
+import { shouldRestrictTools } from './roles.js';
 import { WorkspaceCoordinator } from './workspace/coordinator.js';
 import { gitVersion } from './workspace/git.js';
 
@@ -214,6 +215,10 @@ export async function apply(ctx, config = {}) {
   const adapter = new HostAdapter({
     ctx,
     logger,
+    // Recovery resumes members through its own path and a session created before
+    // this option existed records no preset, so the configured default has to live
+    // on the adapter: otherwise a restart silently costs existing rooms their tools.
+    agentPreset: options.memberAgentPreset,
     // Real token usage from the member's own stream (the design notes). Wrapped so a
     // storage failure can never break a model call that already succeeded.
     onUsage: (invocation) => {
@@ -602,16 +607,6 @@ function pluginScopedToolNames(ctx) {
   } catch {
     return [];
   }
-}
-
-/**
- * Detail-only roles get coordination tools but no code-writing tools, so "this
- * member does not modify the repository" is enforced rather than requested.
- * @param {string} role
- * @returns {boolean}
- */
-function shouldRestrictTools(role) {
-  return role === 'designer' || role === 'docs';
 }
 
 /**

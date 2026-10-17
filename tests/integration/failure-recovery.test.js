@@ -436,4 +436,39 @@ describe('project room — restart and recovery', () => {
     assert.equal(stackB.store.listAttempts(task.id).length, 1);
     assert.equal(again.sessionsRestored, 0, '会话已经活着，就不再重复恢复');
   });
+
+  it('resumes a detail-only member restricted, exactly as a live turn would', async (t) => {
+    // Recovery has its own resume path. It used to call `resumeMember` without
+    // `restrictTools`, so a designer came back from a restart UNRESTRICTED while a
+    // freshly created one was restricted. The member's tool list is the only place
+    // that difference shows up, which is why it survived this long.
+    const dataDir = useTemporaryDataDir('recovery-policy');
+    const stackA = createRoomStack({ dataDir });
+    const teamA = await createStandardRoom(stackA, {
+      members: [
+        { role: 'coordinator', displayName: '主代理', handle: 'coordinator' },
+        { role: 'backend', displayName: '后端', handle: 'backend' },
+        { role: 'designer', displayName: '设计', handle: 'designer' },
+      ],
+    });
+    const roomId = teamA.room.id;
+    const designer = teamA.agents.designer;
+    const backend = teamA.agents.backend;
+    await stackA.close();
+
+    const stackB = createRoomStack({ dataDir, file: stackA.file });
+    t.after(() => stackB.close());
+    const resumed = [];
+    const original = stackB.adapter.resumeMember.bind(stackB.adapter);
+    stackB.adapter.resumeMember = async (input) => {
+      resumed.push(input);
+      return original(input);
+    };
+
+    await stackB.recovery.recoverRoom(roomId);
+
+    const byMember = new Map(resumed.map((input) => [input.memberId, input]));
+    assert.equal(byMember.get(designer.id)?.restrictTools, true, '设计成员恢复后必须和创建时一样受限');
+    assert.equal(byMember.get(backend.id)?.restrictTools, false, '后端成员恢复后保留写入工具');
+  });
 });

@@ -20,6 +20,7 @@
  */
 
 import { isoTimestamp } from '../../../shared/contracts.js';
+import { shouldRestrictTools } from '../roles.js';
 
 export class RecoveryService {
   /**
@@ -114,6 +115,11 @@ export class RecoveryService {
           sessionId: member.sessionId,
           model,
           personaInstructions: this.rooms.instructionsFor(member.id),
+          // Recovery used to resume without this, so a designer or docs member came
+          // back from a restart UNRESTRICTED while a fresh one was restricted. Pass
+          // the same policy the live path uses; the preset itself comes from the
+          // adapter's configured default.
+          restrictTools: shouldRestrictTools(member.role),
         });
         sessionsRestored += 1;
         const agent = this.adapter.agentOf(member.id);
