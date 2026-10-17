@@ -10,15 +10,15 @@
  *   - **Final replies (`publishFinalReplies`).** A turn that was driven by a room
  *     message publishes its final assistant text back into the room, so the user
  *     can never be in the position of "the agent answered but the group never
- *     saw it" (the design notes).
+ *     saw it".
  *
  * Two deliberate restrictions keep the automatic path from being noisy:
  *
  *   1. A turn must have consumed a room message to be eligible. An unrelated
- *      turn in a borrowed user session is never published (AT29).
+ *      turn in a borrowed user session is never published.
  *   2. Only the LAST assistant message of the turn is published, and only after
  *      the turn closes — a draft is not a statement, and a streamed half-name
- *      must not wake anyone (§4.2).
+ *      must not wake anyone.
  *
  * @module dsh-project-room/src/host/delivery/turn-observer
  */
@@ -61,7 +61,7 @@ export class TurnObserver {
    *
    * Everything is registered through `agent.ctx`, so disposal of that agent
    * removes these listeners with it — reloading the plugin twice cannot produce
-   * double replies (the design notes).
+   * double replies.
    *
    * @param {object} input
    * @param {string} input.memberId
@@ -121,7 +121,7 @@ export class TurnObserver {
    * entered a turn, and the only place the assistant's final text can be read
    * without depending on a live stream.
    *
-   * @param {object} ctx   Plugin context.
+   * @param {object} ctx Plugin context.
    */
   attachHost(ctx) {
     const members = () => new Map(this.store.listRooms().flatMap((room) => this.store.listMembers(room.id, { includeRetired: true })).map((member) => [member.sessionId, member]));
@@ -212,6 +212,14 @@ export class TurnObserver {
     if (state.publishing) return null;
     const member = this.store.getMember(memberId);
     if (!member || !this.enabled()) return null;
+    const room = this.store.getRoom(member.roomId);
+    if (!room || room.status === 'trashed' || room.status === 'quiescing' || room.status === 'purging' || room.status === 'archived') {
+      // A late turn from a project that is already stopping, archived or in the
+      // recycle bin must not publish back into it. Dropping the answer with a log
+      // line is safer than writing a message a restore would then resurrect.
+      this.logger?.warn?.(`[project-room] dropped a final reply for ${memberId}: room ${member.roomId} is ${room?.status ?? 'missing'}`);
+      return null;
+    }
 
     const consumed = [...state.consumed];
     const assistant = state.lastAssistant;
@@ -223,7 +231,7 @@ export class TurnObserver {
       // expected. Without this the plugin is indistinguishable from broken: a turn
       // that ran and produced only tool calls looks exactly like a turn whose reply
       // was lost, and neither leaves a trace. The two reasons are different facts and
-      // are named differently (the design notes, §10.3).
+      // are named differently.
       if (consumed.length > 0) {
         this.store.appendEvent({
           roomId: member.roomId,
@@ -317,7 +325,7 @@ export class TurnObserver {
 
   /**
    * Release every listener this observer registered. Called on plugin unload so
-   * no callback outlives the fiber that owns it (the design notes).
+   * no callback outlives the fiber that owns it.
    */
   dispose() {
     for (const dispose of this.disposers.splice(0)) {
@@ -401,7 +409,7 @@ export function readAssistantEnvelope(event) {
  * Extract plain text from a durable content-block array.
  *
  * Reasoning blocks and tool calls are deliberately excluded: they are internal
- * work, not a statement to the group (§4.2: tool activity and natural speech are
+ * work, not a statement to the group (: tool activity and natural speech are
  * presented separately).
  *
  * @param {Array<{ type: string, text?: string }>} content

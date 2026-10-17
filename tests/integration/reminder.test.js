@@ -1,7 +1,7 @@
 /**
- * Project Room — reminder expiry (the design notes).
+ * Project Room — reminder expiry.
  *
- * §11.4 asks for reminders that are durable, deduplicated, and — the part with
+ * Reminder expiry covers reminders that are durable, deduplicated, and — the part with
  * real product consequences — **invalidated when the reason for them is gone**:
  *
  *   "任务已完成、回复已收到或成员已退出时，提醒失效。
@@ -72,7 +72,7 @@ async function completeTask(stack, { room, agents, objective, workspaceRef, file
   stack.tasks.assign({ roomId: room.id, taskId: task.id, memberId: agents.backend.id, actorId: agents.coordinator.id });
   stack.tasks.update({ roomId: room.id, taskId: task.id, actorId: agents.backend.id, status: 'in_progress' });
   // A real artifact first: acceptance requires at least one verified product,
-  // so a task cannot reach `accepted` on a sentence (AT25).
+  // so a task cannot reach `accepted` on a sentence.
   stack.artifacts.publish({
     roomId: room.id,
     taskId: task.id,
@@ -160,7 +160,7 @@ describe('reminders — a due reminder is posted once and recorded', () => {
 
   it('never mentions anyone, so a reminder cannot start a new causal chain', async () => {
     const posted = reminderMessages(stack, room.id)[0];
-    assert.equal(posted.mentions.length, 0, '§11.4: a reminder must not trigger reminders of its own');
+    assert.equal(posted.mentions.length, 0, 'a reminder must not trigger reminders of its own');
   });
 
   it('records a reminder.fired event an operator can trace', async () => {

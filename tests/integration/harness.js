@@ -32,7 +32,10 @@ import { HostAdapter } from '../../src/host/adapter/host-adapter.js';
 import { DecisionService } from '../../src/host/decisions/decision-service.js';
 import { DeliveryCoordinator } from '../../src/host/delivery/coordinator.js';
 import { TurnObserver, extractText } from '../../src/host/delivery/turn-observer.js';
+import { ProjectLifecycleService } from '../../src/host/lifecycle/lifecycle-service.js';
 import { ModelProfileService } from '../../src/host/models/model-service.js';
+import { ResearchRepository } from '../../src/host/research/repository.js';
+import { ResearchService } from '../../src/host/research/research-service.js';
 import { RecoveryService } from '../../src/host/recovery/recovery-service.js';
 import { ReminderService } from '../../src/host/reminders/reminder-service.js';
 import { ContextBuilder } from '../../src/host/room/context-builder.js';
@@ -136,6 +139,10 @@ export function createFakeHost(options = {}) {
           record.toolRestrictions.push(definition);
           return () => {};
         },
+        guard(guard) {
+          record.toolGuards.push(guard);
+          return () => {};
+        },
         /**
          * The tool names this member's surface currently exposes. The adapter
          * intersects its deny list with whatever the registry really has, so a
@@ -178,6 +185,7 @@ export function createFakeHost(options = {}) {
       received: [],
       cancels: [],
       toolRestrictions: [],
+      toolGuards: [],
       promptSections: [],
       /** @type {Map<string, Set<Function>>} */
       listeners: new Map(),
@@ -526,7 +534,7 @@ export function createRoomStack(options = {}) {
   };
 
   // Rebuild the index from storage, so identity survives a plugin reload while
-  // the host sessions stay alive (the design notes step 2).
+  // the host sessions stay alive.
   for (const room of store.listRooms()) {
     for (const member of store.listMembers(room.id, { includeRetired: true })) {
       if (member.sessionId) sessionIndex.set(member.sessionId, member.id);
@@ -608,6 +616,35 @@ export function createRoomStack(options = {}) {
     createSession: (input) => ensureMemberSession(input),
   });
   const decisions = new DecisionService({ store, rooms, tasks, messages, logger });
+  const researchRepository = new ResearchRepository({ store });
+  const research = new ResearchService({
+    store,
+    repository: researchRepository,
+    rooms,
+    models,
+    adapter,
+    messages,
+    tasks,
+    planning,
+    decisions,
+    artifacts,
+    protectedRoots: options.protectedRoots ?? [],
+    budgetDefaults: options.research,
+    enabled: options.research?.enabled !== false,
+    logger,
+  });
+  const lifecycle = new ProjectLifecycleService({
+    store,
+    adapter,
+    ensureMemberSession,
+    researchSessionRows: (roomId) => researchRepository.listResearchSessionsForRoom(roomId),
+    logger,
+    retentionMs: options.retentionMs,
+  });
+  lifecycle.onTransition = (action, roomId) => {
+    if (action === 'pause') research.suspendForLifecycle(roomId, 'pause', 'project paused');
+    else if (action === 'archive' || action === 'trash') research.suspendForLifecycle(roomId, action, `project ${action}`);
+  };
   const observer = new TurnObserver({ store, adapter, messages, delivery, logger });
   // Same wiring as the composition root: durable session events are what prove a
   // specific input entered a turn, and what publishes a member's final reply.
@@ -635,6 +672,9 @@ export function createRoomStack(options = {}) {
     messages,
     planning,
     decisions,
+    lifecycle,
+    researchRepository,
+    research,
     observer,
     recovery,
     reminders,

@@ -4,7 +4,7 @@
  * Owns rooms, the member table, aliases, and the room timeline. It does not
  * deliver anything: delivery belongs to {@link DeliveryCoordinator}, which keeps
  * "the message is saved" and "the host accepted the input" as the two different
- * facts they are (design D05, §10.6).
+ * facts they are.
  *
  * @module dsh-project-room/src/host/room/room-service
  */
@@ -22,7 +22,7 @@ import { MentionResolver, mergeMentions, normalizeName } from '../../../shared/m
 import { DEFAULT_MODEL_SETTINGS } from '../models/model-service.js';
 import { composeCoordinatorInstructions, composePersonaInstructions, DEFAULT_PERSONA } from './persona.js';
 
-/** Room-level defaults, matching the design's proposed configuration (§21.1). */
+/** Room-level defaults. */
 export const DEFAULT_ROOM_CONFIG = Object.freeze({
   collaboration: {
     topology: 'all-to-all',
@@ -93,7 +93,7 @@ export class RoomService {
    * Create a room with its coordinator and optional specialist members.
    *
    * The room row, its members and the `room.created` event commit in ONE
-   * transaction, so a failure never leaves a half-built team (the design notes).
+   * transaction, so a failure never leaves a half-built team.
    * Sessions are created after the commit: the durable identity exists first,
    * which is what lets an interrupted creation be reconciled instead of
    * duplicated.
@@ -287,7 +287,7 @@ export class RoomService {
     this.store.updateDispatch(dispatchKey, {
       state: 'created',
       // Recording the member id on the intent row is what makes a retry reuse
-      // this member instead of creating a second one (the design notes, AT41).
+      // this member instead of creating a second one.
       memberId: member.id,
       detail: JSON.stringify({ memberId: member.id }),
     });
@@ -317,7 +317,7 @@ export class RoomService {
   /**
    * Change a member's member-level fields. Renaming keeps every existing
    * `memberId` reference valid, which is what makes renamed members keep
-   * receiving the mentions that were bound to them (the design notes rule 12).
+   * receiving the mentions that were bound to them.
    * @param {object} input
    * @param {string} input.memberId
    * @param {Partial<{ displayName: string, aliases: string[], role: string, status: string }>} input.patch
@@ -455,7 +455,7 @@ export class RoomService {
       messages,
       // A message and its `message.created` event share one seq, so "events
       // after the cursor" is the same cursor the timeline uses; a reconnect
-      // therefore refills from storage instead of relying on a push (the design notes).
+      // therefore refills from storage instead of relying on a push.
       events: this.store
         .listMessages(input.roomId, { afterSeq: nextSeq, limit: 0 })
         .slice(0, 0),
@@ -504,6 +504,59 @@ export class RoomService {
     return room;
   }
 
+  /**
+   * The execution gate shared by task, plan and artifact mutations. A paused,
+   * archived or trashed project must not gain new work; only the lifecycle
+   * service may move it back to `active`.
+   * @param {string} roomId
+   * @param {string} action
+   * @returns {object}
+   */
+  assertActive(roomId, action = '执行工作') {
+    const room = this.requireRoom(roomId);
+    if (room.status === 'trashed') {
+      throw new RoomError('ROOM_TRASHED', `项目在回收站中，已阻止${action}；请先恢复项目。`, { status: room.status });
+    }
+    if (room.status === 'purging') {
+      throw new RoomError('ROOM_PURGING', `项目正在永久删除，已阻止${action}；不能在新工作中复活它。`, { status: room.status });
+    }
+    if (room.status === 'quiescing') {
+      throw new RoomError('ROOM_QUIESCING', `项目正在停止执行，已阻止${action}；请等待核对完成。`, { status: room.status });
+    }
+    if (room.status === 'archived') {
+      throw new RoomError('ROOM_ARCHIVED', `项目已归档，已阻止${action}；请先恢复为暂停态再启动。`, { status: room.status });
+    }
+    if (room.status === 'paused') {
+      throw new RoomError('ROOM_PAUSED', `项目已暂停，已阻止${action}；请先恢复运行。`, { status: room.status });
+    }
+    return room;
+  }
+
+  /**
+   * The read-only gate for management writes. Pausing stops execution but still
+   * allows the owner to prepare members and models; archiving and the recycle bin
+   * are read-only until restored.
+   * @param {string} roomId
+   * @param {string} action
+   * @returns {object}
+   */
+  assertWritable(roomId, action = '修改项目') {
+    const room = this.requireRoom(roomId);
+    if (room.status === 'trashed') {
+      throw new RoomError('ROOM_TRASHED', `项目在回收站中，已阻止${action}；请先恢复项目。`, { status: room.status });
+    }
+    if (room.status === 'purging') {
+      throw new RoomError('ROOM_PURGING', `项目正在永久删除，已阻止${action}。`, { status: room.status });
+    }
+    if (room.status === 'quiescing') {
+      throw new RoomError('ROOM_QUIESCING', `项目正在停止执行，已阻止${action}；请等待核对完成。`, { status: room.status });
+    }
+    if (room.status === 'archived') {
+      throw new RoomError('ROOM_ARCHIVED', `项目已归档，已阻止${action}；请先恢复为暂停态。`, { status: room.status });
+    }
+    return room;
+  }
+
   /** @param {string} memberId */
   requireMember(memberId) {
     const member = this.store.getMember(memberId);
@@ -527,7 +580,7 @@ export class RoomService {
 
   /**
    * Resolve a body without sending — the client's preview path, using the same
-   * library and the same rules as the server (§5.3 rule 11).
+   * library and the same rules as the server ( rule 11).
    * @param {object} input
    * @param {string} input.roomId
    * @param {string} input.body

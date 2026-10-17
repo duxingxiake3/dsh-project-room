@@ -5,12 +5,8 @@
  * in the plugin talks to this interface, so a host API change is fixed here
  * rather than across the codebase.
  *
- * Verified against the desktop host PACKAGED runtime **0.2.0-rc.2**
- * (`<DSH-APP>\resources\app.asar\dsh\node_modules\@deepseek-ai\*`, Electron 44 /
- * Node 24.18.1) — the evidence behind every method below was read from that copy,
- * not assumed. A second, different install (`0.1.7-rc.1`) exists on this
- * machine and is NOT the live one; `scripts/read-asar.mjs` exists so the packaged
- * copy can be read directly instead of assumed. Facts this file depends on:
+ * Verified against the packaged desktop runtime: every method below was read
+ * from that packaged copy, not assumed. Facts this file depends on:
  *
  *   - `ctx.agents.create({ sessionId, meta, agentOptions, setup })` and
  *     `ctx.agents.resume({ resumeSessionId, ... })` are the registry facade; the
@@ -23,11 +19,11 @@
  *   - `agent/request` is an agent-scoped waterfall: a listener registered on
  *     `agentCtx` decides that member's provider/model for every request. This is
  *     what makes "each member has its own real model route" true rather than
- *     cosmetic (the design notes).
+ *     cosmetic.
  *   - `agent.inbox.claimed` / `agent/inbox/inserted` are agent-scoped emit
  *     events; `session/event` on the plugin context logs the durable `user/message`
  *     that proves a specific input entered a turn. Together they are the only
- *     evidence this plugin accepts for "accepted" and "claimed" (the design notes).
+ *     evidence this plugin accepts for "accepted" and "claimed".
  *   - `ctx.llm.listProviders()` / `listModels(provider)` are the only honest
  *     model catalogue. Nothing here invents a model id from a brand name.
  *
@@ -89,7 +85,7 @@ export function createRelayMessage(input) {
 export class HostAdapter {
   /**
    * @param {object} input
-   * @param {import('@deepseek-ai/cordis').Context} input.ctx  Plugin context; owns every agent it creates.
+   * @param {import('@deepseek-ai/cordis').Context} input.ctx Plugin context; owns every agent it creates.
    * @param {object} [input.logger]
    * @param {(invocation: object) => void} [input.onUsage]  Sink for real token usage per member call.
    * @param {string} [input.agentPreset]  Preset to mount on resume when a session recorded none.
@@ -123,6 +119,8 @@ export class HostAdapter {
     this.presetWaitBudget = input.presetWaitBudget ?? 3000;
     /** @type {Map<string, { handle: object, modelRef: { current: object | null } }>} */
     this.members = new Map();
+    /** Dedicated research sessions; never used for normal project messages. */
+    this.researchSessions = new Map();
     /** @type {Set<(event: object) => void>} */
     this.listeners = new Set();
     this.capabilitiesCache = null;
@@ -132,7 +130,7 @@ export class HostAdapter {
     this.toolRestrictions = new Map();
     /**
      * Where real token counts go. Injected rather than reached for, so the adapter
-     * keeps owning no storage (the design notes: the store belongs to the services).
+     * keeps owning no storage.
      * @type {((invocation: object) => void) | null}
      */
     this.onUsage = input.onUsage ?? null;
@@ -140,13 +138,13 @@ export class HostAdapter {
   }
 
   /* ---------------------------------------------------------------- *
-   * Capability probe — the compatibility report in code form
+   * Capability probe — the host surface this plugin relies on, in code form
    * ---------------------------------------------------------------- */
 
   /**
    * Probe what this installation can actually do. Every `false` must change
    * product behaviour visibly; none may silently degrade into "the coordinator
-   * relays it" (the design notes).
+   * relays it".
    * @returns {import('../../../shared/contracts.js').HostCapabilities}
    */
   capabilities() {
@@ -385,7 +383,7 @@ export class HostAdapter {
         // 1b. What the member's calls actually cost. `llm/stream` is the only place
         //     real token counts exist (`StreamChunk` of type `usage`), and it is
         //     registered per member session so one room's usage can never be
-        //     attributed to another's (the design notes "用量费用：记录实际用量").
+        //     attributed to another's.
         agentCtx.on('llm/stream', (options, next) =>
           adapter.#observeUsage({
             memberId: input.memberId,
@@ -431,7 +429,173 @@ export class HostAdapter {
   }
 
   /**
+   * Create a dedicated research session. It is owned by the plugin, has its own
+   * session id, and is never a normal room member. The caller supplies a
+   * synchronous admission gate; `agent/pre-step` rejects before a provider call
+   * when the grant/run/budget is no longer valid.
+   *
+   * @param {object} input
+   * @param {string} input.researchId
+   * @param {string} input.memberId
+   * @param {string} input.roomId
+   * @param {string} input.cwd
+   * @param {{ providerRoute: string, modelId: string } | null} input.model
+   * @param {string} [input.personaInstructions]
+   * @param {string} [input.agentPreset]
+   * @param {() => boolean} input.canAdmit
+   * @param {(exec: object) => string | undefined} [input.guardTool]
+   * @returns {Promise<{ sessionId: string }>}
+   */
+  async createResearchSession(input) {
+    const ctx = this.ctx;
+    if (!this.capabilities().ownedSessions) {
+      throw new RoomError('HOST_CAPABILITY_MISSING', '当前宿主不支持研究专用会话。');
+    }
+    const sessionId = newSessionId(input.roomId, `research-${input.researchId}-${input.memberId}`);
+    const selection = { current: input.model ? { ...input.model } : null };
+    const adapter = this;
+    const composition = await this.#composePreset(input.agentPreset, input.memberId);
+    const handle = await ctx.agents.create({
+      sessionId,
+      meta: {
+        cwd: input.cwd,
+        researchId: input.researchId,
+        ...(composition.presetId === undefined ? {} : { agentPreset: composition.presetId }),
+      },
+      agentOptions: input.model ? { provider: input.model.providerRoute, model: input.model.modelId } : {},
+      setup: async (agentCtx) => {
+        agentCtx.on('agent/pre-step', async (_payload, next) => {
+          if (!input.canAdmit(sessionId)) {
+            return { kind: 'reject' };
+          }
+          return next();
+        });
+        agentCtx.on('agent/request', async (payload, next) => {
+          const proposed = await next();
+          const current = selection.current;
+          if (!current) return proposed;
+          adapter.recordRoute(input.memberId, input.roomId, sessionId, current, payload);
+          return { ...proposed, provider: current.providerRoute, model: current.modelId };
+        });
+        agentCtx.on('llm/stream', (options, next) =>
+          adapter.#observeUsage({
+            memberId: input.memberId,
+            roomId: input.roomId,
+            sessionId,
+            researchId: input.researchId,
+            selection,
+            options,
+            next,
+          }),
+        );
+        if (input.personaInstructions) {
+          agentCtx.systemPrompt.section({
+            name: `project-room-research-${input.researchId}-${input.memberId}`,
+            order: 41,
+            text: () => input.personaInstructions,
+          });
+        }
+        await composition.mount(agentCtx);
+        if (typeof agentCtx.tools?.guard === 'function' && input.guardTool) {
+          agentCtx.tools.guard((exec) => input.guardTool(exec));
+        }
+        // A research session is not a room member. Keep only research tools and
+        // the host's own file/shell surface; remove room_send/task/decision tools
+        // so it cannot impersonate a normal member.
+        try {
+          const available = (agentCtx.tools?.schemas?.() ?? []).map((schema) => schema.name);
+          const deny = available.filter((name) => name.startsWith('room_') && !name.startsWith('room_research_'));
+          if (deny.length > 0) agentCtx.tools.restrict({ deny });
+        } catch (error) {
+          adapter.logger?.warn?.(`[project-room] research tool restriction failed: ${error?.message ?? error}`);
+        }
+        return undefined;
+      },
+    });
+    this.researchSessions.set(sessionId, { handle, researchId: input.researchId, memberId: input.memberId, roomId: input.roomId });
+    this.emit({ type: 'research-session-created', researchId: input.researchId, memberId: input.memberId, sessionId });
+    return { sessionId };
+  }
+
+  /** Queue one user-role research instruction into its dedicated session. */
+  async followupResearchSession(sessionId, text) {
+    const entry = this.researchSessions.get(sessionId);
+    if (!entry) throw new RoomError('RESEARCH_NOT_FOUND', `研究会话 ${sessionId} 不存在。`);
+    await entry.handle.agent.followup({ content: [{ type: 'text', text }], source: { kind: 'user' } });
+  }
+
+  /** @param {string} sessionId */
+  researchSession(sessionId) {
+    return this.researchSessions.get(sessionId)?.handle?.agent ?? null;
+  }
+
+  /** Dedicated sessions still live for one room (used by the ownership ledger). */
+  researchSessionsOfRoom(roomId) {
+    return [...this.researchSessions.entries()]
+      .filter(([, entry]) => entry.roomId === roomId)
+      .map(([sessionId, entry]) => ({ sessionId, researchId: entry.researchId, memberId: entry.memberId }));
+  }
+
+  /** Cancel in-flight turns for one research; dedicated sessions only. */
+  cancelResearchSessions(researchId) {
+    for (const entry of this.researchSessions.values()) {
+      if (entry.researchId !== researchId) continue;
+      try {
+        entry.handle.agent.cancel({ kind: 'user' });
+      } catch {
+        /* a session that is already idle needs no cancel */
+      }
+    }
+  }
+
+  /**
+   * Dispose every dedicated session of one research, oldest first. A failure is
+   * reported instead of being retried blindly; the caller keeps the rows and
+   * surfaces the residue.
+   * @param {string} researchId
+   * @returns {Promise<{ disposed: string[], failed: Array<{ sessionId: string, message: string }> }>}
+   */
+  async disposeResearchSessions(researchId) {
+    const disposed = [];
+    const failed = [];
+    for (const [sessionId, entry] of [...this.researchSessions.entries()]) {
+      if (entry.researchId !== researchId) continue;
+      try {
+        await entry.handle.dispose();
+        this.researchSessions.delete(sessionId);
+        disposed.push(sessionId);
+      } catch (error) {
+        failed.push({ sessionId, message: String(error?.message ?? error) });
+        this.logger?.warn?.(`[project-room] research session dispose failed for ${sessionId}: ${error?.message ?? error}`);
+      }
+    }
+    if (disposed.length > 0) this.emit({ type: 'research-sessions-disposed', researchId, sessionIds: disposed });
+    return { disposed, failed };
+  }
+
+  /**
+   * Dispose exactly one dedicated research session. Missing means it was already
+   * released (the durable row is deleted by the purge, not here).
+   * @param {string} sessionId
+   * @returns {Promise<boolean>}
+   */
+  async releaseResearchSession(sessionId) {
+    const entry = this.researchSessions.get(sessionId);
+    if (!entry) return true;
+    try {
+      await entry.handle.dispose();
+      this.researchSessions.delete(sessionId);
+      this.emit({ type: 'research-session-released', sessionId, researchId: entry.researchId });
+      return true;
+    } catch (error) {
+      this.logger?.warn?.(`[project-room] research session dispose failed for ${sessionId}: ${error?.message ?? error}`);
+      return false;
+    }
+  }
+
+  /**
    * Re-open a member's persisted session after a restart.
+   *
    * @param {object} input
    * @param {string} input.memberId
    * @param {string} input.roomId
@@ -514,7 +678,7 @@ export class HostAdapter {
    *
    * The running request keeps its route; the next request uses the new one. No
    * session is recreated, so memberId, avatar, nickname, `@` handles and task
-   * ownership all survive (the design notes).
+   * ownership all survive.
    * @param {object} input
    * @param {string} input.memberId
    * @param {{ providerRoute: string, modelId: string }} input.nextProfile
@@ -553,11 +717,11 @@ export class HostAdapter {
    * what makes a member's final answer answerable to exactly this message);
    * `steer` inserts at the nearest step boundary of a running turn. When the
    * host cannot steer, the caller is told the actual mode instead of being told
-   * a comfortable untruth (the design notes).
+   * a comfortable untruth.
    *
    * @param {object} input
    * @param {string} input.memberId
-   * @param {object} input.message      Host-shaped user message.
+   * @param {object} input.message Host-shaped user message.
    * @param {'queue' | 'steer'} input.mode
    * @returns {{ actualMode: 'queue' | 'steer', hostMessageId: string }}
    */
@@ -586,7 +750,7 @@ export class HostAdapter {
    * Ask the host whether a specific input is still pending or already consumed.
    *
    * This is the honest answer to "did it land?" after a crash between the host
-   * accepting input and the plugin recording the receipt (the design notes).
+   * accepting input and the plugin recording the receipt.
    * @param {object} input
    * @param {string} input.memberId
    * @param {string} input.hostMessageId
@@ -633,15 +797,17 @@ export class HostAdapter {
   async releaseOwnedMember(memberId) {
     const entry = this.members.get(memberId);
     if (!entry) return false;
-    this.members.delete(memberId);
     try {
       await entry.handle.dispose();
-      this.emit({ type: 'member-session-released', memberId });
-      return true;
     } catch (error) {
+      // Keep the entry: the caller may retry after auditing, and dropping it here
+      // would turn a failed dispose into a silent "already gone".
       this.logger?.warn?.(`[project-room] dispose failed for ${memberId}: ${error?.message ?? error}`);
       return false;
     }
+    this.members.delete(memberId);
+    this.emit({ type: 'member-session-released', memberId });
+    return true;
   }
 
   /**
@@ -669,7 +835,7 @@ export class HostAdapter {
 
   /**
    * Record that a real request used a member's route. This is the evidence
-   * behind "each member's model is really in effect" (the design notes, AT36).
+   * behind "each member's model is really in effect".
    * @param {string} memberId
    * @param {string} roomId
    * @param {string} sessionId
@@ -699,7 +865,7 @@ export class HostAdapter {
   }
 
   /**
-   * Wrap one member's model call so its real token usage is recorded (the design notes).
+   * Wrap one member's model call so its real token usage is recorded.
    *
    * Three deliberate choices:
    *
@@ -761,6 +927,7 @@ export class HostAdapter {
       memberId: input.memberId,
       roomId: input.roomId,
       sessionId: input.sessionId,
+      researchId: input.researchId ?? null,
       providerRoute: route.providerRoute,
       modelId: route.modelId,
       turn,
@@ -979,7 +1146,7 @@ export class HostAdapter {
 
   /**
    * Release nothing on unload except the plugin's own members. Borrowed user
-   * sessions are explicitly left alone (the design notes).
+   * sessions are explicitly left alone.
    * @returns {Promise<void>}
    */
   async dispose() {
@@ -1009,7 +1176,7 @@ export function newSessionId(roomId, memberId) {
  *
  * Two installs can exist side by side on one machine (a desktop app bundle and a
  * CLI install), and only one of them is live. Guessing from a path would be
- * exactly the mistake the design warns about, so this asks the running process:
+ * exactly the mistake to avoid, so this asks the running process:
  * resolve the framework package from THIS module's own location and read the
  * version off whatever it finds.
  *
@@ -1037,19 +1204,17 @@ export function readDshVersion() {
   // Fallbacks, in the order they are actually likely to work.
   //
   // The plugin is normally linked OUTSIDE the profile, so its own resolution walk
-  // cannot see the framework, and the profile's own `node_modules` on this machine
-  // contains only the two linked plugins — no `@deepseek-ai` directory at all. So a
-  // profile-only fallback returned `unknown` in precisely the case that needed a
-  // fallback.
+  // cannot see the framework, and the profile's own `node_modules` may contain only
+  // the linked plugins — no `@deepseek-ai` directory at all. A profile-only
+  // fallback therefore returned `unknown` in precisely the case that needed one.
   //
-  // What is NOT done here: guessing a path under `<app>/resources/app.asar`. That
-  // was tried and removed, because it cannot work and cannot be tested — asar is not
-  // a directory to plain Node (`readFileSync('…/app.asar/dsh/…')` is `ENOENT`;
-  // traversal needs Electron's patched `fs`), and this machine's environment exports
-  // no app-root variable to build the path from. The honest position is that the
-  // primary walk above is what resolved `0.2.0-rc.2` in the real desktop host
-  // (`boot-report.json` → `coreResolvedFrom`), and that when it fails the plugin
-  // reports `unknown` and marks compatibility unverified rather than guessing.
+  // What is NOT done here: guessing a path inside the packaged archive. That was
+  // tried and removed, because it cannot work and cannot be tested — an archive is
+  // not a directory to plain Node, traversal needs the host's patched `fs`, and no
+  // app-root variable is exported to build the path from. The honest position is
+  // that the primary walk above is what resolved the version in the real desktop
+  // host (`boot-report.json` → `coreResolvedFrom`), and that when it fails the
+  // plugin reports `unknown` and marks compatibility unverified rather than guessing.
   const fromProfile = () => {
     const profileDir = process.env.DSH_PROFILE_DIR;
     if (!profileDir) return null;

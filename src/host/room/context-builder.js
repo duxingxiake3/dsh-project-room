@@ -2,7 +2,7 @@
  * Project Room — context builder.
  *
  * Turns "this member should answer this message" into the exact block the model
- * sees. The rule from the design notes is that visibility is not the same as
+ * sees. The rule is that visibility is not the same as
  * per-turn input: a member may read the whole room, but one call receives only
  * what the current work needs.
  *
@@ -31,9 +31,9 @@ export class ContextBuilder {
    * Compose the envelope handed to one recipient.
    *
    * @param {object} input
-   * @param {object} input.message           The saved room message.
-   * @param {object} input.author            Author member row.
-   * @param {object} input.recipient         Recipient member row.
+   * @param {object} input.message The saved room message.
+   * @param {object} input.author Author member row.
+   * @param {object} input.recipient Recipient member row.
    * @param {object} input.room
    * @param {boolean} [input.isReply]        Whether this message answers something the recipient sent.
    * @returns {string}
@@ -147,7 +147,7 @@ export class ContextBuilder {
   /**
    * A member's own status line: current task, unread count, and which version
    * they have actually applied. Read by the UI so "read the message" is never
-   * confused with "applied the decision" (the design notes).
+   * confused with "applied the decision".
    * @param {object} member
    * @returns {object}
    */

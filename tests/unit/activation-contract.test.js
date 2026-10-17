@@ -69,7 +69,7 @@ describe('activation contract — Cordis inject declaration', () => {
     // A service in this list must be one the plugin cannot do its job without.
     const allowed = new Set(['tools', 'webServer', 'agents', 'llm', 'systemPrompt']);
     for (const service of plugin.inject) {
-      assert.ok(allowed.has(service), `"${service}" is injected but nothing in the design requires it as a hard dependency`);
+      assert.ok(allowed.has(service), `"${service}" is injected but nothing requires it as a hard dependency`);
     }
   });
 

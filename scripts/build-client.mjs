@@ -1,7 +1,7 @@
 /**
  * Generates the browser half's shared-rule section.
  *
- * The mention parser MUST be identical on both sides — the design notes rule 11 says
+ * The mention parser MUST be identical on both sides — one rule, one implementation
  * preview and server use one library and one rule version. The browser half is a
  * classic script whose module table is CLOSED: `require.async` cannot fetch a
  * package-local chunk that is not a boot-graph row, so registering extra chunks
@@ -41,6 +41,7 @@ const EXPORTS = {
     'TASK_STATUS_LABELS',
     'MEMBER_STATUS_LABELS',
     'ERROR_LABELS',
+    'PROJECT_LIFECYCLE_LABELS',
     'roleTemplate',
     'deliveryLabel',
     'taskLabel',

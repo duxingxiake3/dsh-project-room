@@ -1,9 +1,9 @@
 /**
- * Per-member model routing — the claim R19/AT36 rests on.
+ * Per-member model routing — the claim the routing contract rests on.
  *
  * "Each member picks its own model" is only true if a member's REAL request carries
  * that model. A panel that shows different names while one route serves everyone is
- * exactly what the design forbids, so this asserts the mechanism at the only point
+ * exactly what the product forbids, so this asserts the mechanism at the only point
  * that decides a model call: the agent-scoped `agent/request` waterfall that
  * `HostAdapter` installs during `createMember`/`resumeMember`.
  *
@@ -112,7 +112,7 @@ describe('per-member model routing', () => {
       displayName: '后端·阿北',
       handle: 'backend',
       role: 'backend',
-      cwd: 'E:\\demo',
+      cwd: process.cwd(),
       model: { providerRoute: 'deepseek-official', modelId: 'deepseek-v4-pro' },
       personaInstructions: '你是后端成员。',
     });
@@ -134,7 +134,7 @@ describe('per-member model routing', () => {
       displayName: '后端',
       handle: 'backend',
       role: 'backend',
-      cwd: 'E:\\demo',
+      cwd: process.cwd(),
       model: { providerRoute: 'deepseek-official', modelId: 'deepseek-v4-pro' },
       personaInstructions: '后端',
     });
@@ -144,7 +144,7 @@ describe('per-member model routing', () => {
       displayName: '前端',
       handle: 'frontend',
       role: 'frontend',
-      cwd: 'E:\\demo',
+      cwd: process.cwd(),
       model: { providerRoute: 'pi-ai', modelId: 'glm-4.6' },
       personaInstructions: '前端',
     });
@@ -170,7 +170,7 @@ describe('per-member model routing', () => {
       displayName: '测试',
       handle: 'tester',
       role: 'tester',
-      cwd: 'E:\\demo',
+      cwd: process.cwd(),
       model: { providerRoute: 'deepseek-official', modelId: 'deepseek-flash' },
       personaInstructions: '测试',
     });
@@ -196,7 +196,7 @@ describe('per-member model routing', () => {
       displayName: '文档',
       handle: 'docs',
       role: 'docs',
-      cwd: 'E:\\demo',
+      cwd: process.cwd(),
       model: null,
       personaInstructions: '文档',
     });

@@ -2,7 +2,7 @@
  * Project Room — artifact service.
  *
  * An artifact is a *reference* to something that really exists, never a claim
- * that it exists. That distinction is the whole point of the design notes: a JSON
+ * that it exists. That distinction is the whole point: a JSON
  *成果卡 must not be treated as proof that a file was written or a test ran.
  *
  * What this service actually checks:
@@ -14,7 +14,7 @@
  *   - `verified` is set only from a real check, and stays false otherwise.
  *
  * A missing verification never blocks publication — it marks the artifact as
- * unverified, which is what keeps it out of the acceptance path (AT25).
+ * unverified, which is what keeps it out of the acceptance path.
  *
  * @module dsh-project-room/src/host/workspace/artifact-service
  */
@@ -59,7 +59,7 @@ export class ArtifactService {
    * @returns {object}
    */
   publish(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertActive(input.roomId, '登记成果');
     const actor = this.rooms.requireMember(input.actorId);
     const task = input.taskId ? this.store.getTask(input.taskId) : null;
     if (input.taskId && (!task || task.roomId !== room.id)) {
@@ -124,7 +124,7 @@ export class ArtifactService {
    * @returns {Array<{ artifactId: string, verified: boolean, note: string }>}
    */
   reverify(roomId) {
-    const room = this.rooms.requireRoom(roomId);
+    const room = this.rooms.assertActive(roomId, '复核成果');
     const results = [];
     for (const artifact of this.store.listArtifacts(roomId)) {
       const check = this.#verify({
@@ -199,8 +199,7 @@ export class ArtifactService {
     const target = isAbsolute(location) ? resolve(location) : resolve(join(workspace, location));
     const inside = relative(workspace, target);
     if (inside.startsWith('..') || isAbsolute(inside)) {
-      // A reference outside the project is refused rather than silently accepted
-      // (the design notes: file references must be checked against the project).
+      // A reference outside the project is refused rather than silently accepted.
       return {
         allowed: false,
         verified: false,
@@ -261,7 +260,7 @@ export class ArtifactService {
   }
 
   /**
-   * The 成果卡 shape from the design notes, filled from stored facts only.
+   * The 成果卡 shape, filled from stored facts only.
    * @param {string} taskId
    * @param {string | null} [attemptId]
    * @returns {object}

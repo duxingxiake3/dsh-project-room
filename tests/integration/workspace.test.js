@@ -2,7 +2,7 @@
  * Project Room — workspace isolation and write coordination.
  *
  * These tests use REAL git repositories (a throwaway repo with one commit, and a
- * plain non-repo directory) because the whole point of the design notes is that the
+ * plain non-repo directory) because the whole point is that the
  * isolation mode is a statement of fact: "worktree" must mean a worktree really
  * exists, and "sequential" must come with the reason it degraded.
  */
@@ -319,7 +319,7 @@ describe('workspace — an unmerged worktree is preserved', () => {
 
     const released = stack.workspace.releaseLane(task.id);
     // A worktree needs no serialization lane, so there is nothing to release —
-    // and nothing may be deleted either (the design notes).
+    // and nothing may be deleted either.
     assert.equal(released.keptWorktree, null);
     assert.equal(existsSync(prepared.path), true, '成员退出后未合并的工作目录必须保留');
     assert.equal(existsSync(join(prepared.path, 'unmerged.txt')), true, '工作树里的实际改动必须保留');

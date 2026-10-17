@@ -1,7 +1,7 @@
 /**
  * Project Room — planning and assignment service.
  *
- * The coordinator proposes; this service validates and writes. the design notes is
+ * The coordinator proposes; this service validates and writes. These rules are
  * the specification:
  *
  *   - **Transaction.** Plan revision, tasks, owners and the pending-dispatch rows
@@ -175,7 +175,7 @@ export class PlanningService {
    * @returns {Promise<{ plan: object, tasks: object[], dispatched: object[], skipped: object[] }>}
    */
   async commit(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertActive(input.roomId, '提交计划');
     const plan = this.store.getPlan(input.planId);
     if (!plan || plan.roomId !== room.id) throw new RoomError('NOT_FOUND', `计划 ${input.planId} 不存在。`);
     if (
@@ -280,7 +280,7 @@ export class PlanningService {
    * @returns {Promise<{ dispatched: object[], skipped: object[] }>}
    */
   async dispatchReady(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertActive(input.roomId, '派发任务');
     const planRevision = input.planRevision ?? room.planRevision;
     const dispatched = [];
     const skipped = [];
@@ -328,12 +328,13 @@ export class PlanningService {
   /**
    * Wake one owner with their task. The member gets a sourced envelope, not a
    * bare instruction, so the first thing it sees is the task's acceptance
-   * criteria and dependencies (the design notes).
+   * criteria and dependencies.
    * @param {object} input
    */
   async sendTaskDispatch(input) {
     if (!this.messages) return;
     const { room, task, owner, attempt } = input;
+    this.rooms.assertActive(room.id, '派发任务');
     const coordinator = this.store.listMembers(room.id).find((member) => member.role === 'coordinator');
     const body = [
       `【任务派发】${task.objective}`,
@@ -368,7 +369,7 @@ export class PlanningService {
    *
    * The member row is written before the host session is created, so an
    * interruption is reconciled against the recorded intent instead of producing
-   * a second member (§13.7).
+   * a second member.
    *
    * @param {object} input
    * @param {string} input.roomId
@@ -383,7 +384,7 @@ export class PlanningService {
    * @returns {Promise<object>}
    */
   async ensureMember(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertActive(input.roomId, '添加成员');
     const settings = room.config?.planning ?? {};
     const existing = this.store
       .listMembers(room.id)
@@ -405,7 +406,7 @@ export class PlanningService {
       );
     }
     // Validate the route before creating anything: a member that cannot run is
-    // worse than a reported gap (the design notes step 5).
+    // worse than a reported gap.
     const profile = await this.models.requireProfile(choice.profileRef);
 
     const result = await this.rooms.ensureMember({
@@ -449,7 +450,7 @@ export class PlanningService {
 
   /**
    * Re-check circular waits after a plan round and report them instead of
-   * retrying forever (the design notes).
+   * retrying forever.
    * @param {string} roomId
    * @returns {{ detected: boolean, tasks: string[] }}
    */
@@ -465,8 +466,8 @@ export class PlanningService {
 
 /**
  * Requirement coverage: which work items claim to satisfy which acceptance
- * areas. Reported, never asserted as complete — the design is explicit that a
- * model check cannot guarantee nothing was missed (§13.6).
+ * areas. Reported, never asserted as complete — a model check cannot guarantee
+ * that nothing was missed.
  * @param {Array<object>} proposed
  * @returns {{ workItems: number, withAcceptance: number, roles: string[], parallelizable: string[] }}
  */

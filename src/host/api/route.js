@@ -5,7 +5,7 @@
  * host's web-server service. It is a plain request/response JSON endpoint, not a
  * bespoke socket: the group timeline is a durable, sequenced record, so a
  * reconnecting page refills from storage by cursor rather than trusting a push it
- * may have missed (the design notes).
+ * may have missed.
  *
  * Two boundaries are enforced here and nowhere else:
  *
@@ -28,12 +28,34 @@ import { DEFAULT_ROOM_CONFIG } from '../room/room-service.js';
 const MAX_BODY_BYTES = 512 * 1024;
 
 /**
+ * The authenticated human a lifecycle mutation is attributed to. The route is
+ * already on the authenticated channel; this resolver refuses when the project
+ * has no active human or when it cannot tell which active human acted. An agent
+ * has no route-level caller identity, so it can never satisfy this.
+ * @param {import('../storage/store.js').RoomStore} store
+ * @param {string} roomId
+ * @returns {string}
+ */
+export function resolveLifecycleActor(store, roomId) {
+  const humans = store.listMembers(roomId).filter((member) => member.kind === 'human');
+  if (humans.length === 0) {
+    throw new RoomError('FORBIDDEN', '当前项目没有活跃的可识别人类成员，生命周期操作仅限真实用户。');
+  }
+  if (humans.length > 1) {
+    throw new RoomError('FORBIDDEN', '当前项目有多个活跃人类成员，无法验证具体操作人；生命周期操作已停用。', {
+      humans: humans.map((member) => member.id),
+    });
+  }
+  return humans[0].id;
+}
+
+/**
  * Register the route on the host web server.
  * @param {object} services
  * @returns {() => void} disposer
  */
 export function registerRoomRoute(services) {
-  const { ctx, store, rooms, messages, models, tasks, planning, decisions, artifacts, adapter, delivery, observer, guard, recovery, workspace, ensureMemberSession, memberOfSession, capabilities, logger } = services;
+  const { ctx, store, rooms, messages, models, tasks, planning, decisions, artifacts, adapter, delivery, observer, guard, recovery, workspace, lifecycle, research, ensureMemberSession, memberOfSession, capabilities, logger } = services;
   // The route reads the same member view the timeline does, so the panel and the
   // wire cannot disagree about "unread" or "waiting for you".
   const context = services.context ?? new ContextBuilder({ store });
@@ -64,7 +86,59 @@ export function registerRoomRoute(services) {
   };
 
   /**
-   * One switch over the logical operations of the design notes. Kept flat and
+   * The authenticated human in this project. The route itself is already on the
+   * authenticated `/api` channel; this resolver names the member row the action
+   * is attributed to, and refuses when the project has no human identity.
+   * @param {string} roomId
+   * @returns {string}
+   */
+  function lifecycleActor(roomId) {
+    return resolveLifecycleActor(store, roomId);
+  }
+
+  /** Human identity for research approval/stop; agents have no such route. */
+  function researchHumanActor(roomId) {
+    const humans = store.listMembers(roomId).filter((member) => member.kind === 'human');
+    if (humans.length === 0) {
+      throw new RoomError('FORBIDDEN', '当前项目没有可识别的人类成员，研究审批仅限真实用户。');
+    }
+    if (humans.length > 1) {
+      throw new RoomError('FORBIDDEN', '当前项目有多个活跃人类成员，无法验证具体审批人；多人类审批已停用。', {
+        humans: humans.map((member) => member.id),
+      });
+    }
+    return humans[0].id;
+  }
+
+  /** @returns {import('../research/research-service.js').ResearchService} */
+  function requireResearch() {
+    if (!research) throw new RoomError('RESEARCH_DISABLED', '深度研究服务未装配。');
+    return research;
+  }
+
+  /**
+   * Validate the revision/idempotency envelope every lifecycle mutation needs.
+   * A missing revision is refused rather than silently replaced with "latest",
+   * because that is exactly how a double click becomes a second transition.
+   * @param {string} action
+   * @param {object} payload
+   */
+  function lifecycleInput(action, payload) {
+    if (!Number.isInteger(payload.expectedLifecycleRevision) || payload.expectedLifecycleRevision < 0) {
+      throw new RoomError('INVALID_REQUEST', `${action} 需要 expectedLifecycleRevision（非负整数）。`);
+    }
+    if (typeof payload.idempotencyKey !== 'string' || payload.idempotencyKey.trim().length === 0) {
+      throw new RoomError('INVALID_REQUEST', `${action} 需要非空的 idempotencyKey，防止重复点击产生两次操作。`);
+    }
+    return {
+      expectedLifecycleRevision: payload.expectedLifecycleRevision,
+      idempotencyKey: payload.idempotencyKey,
+      requestedBy: lifecycleActor(payload.roomId),
+    };
+  }
+
+  /**
+   * One switch over the logical operations. Kept flat and
    * explicit so the wire surface is auditable in one screen.
    * @param {string} action
    * @param {object} payload
@@ -110,7 +184,183 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.list': {
-        return { rooms: store.listRooms().map((room) => ({ ...room, members: store.listMembers(room.id, { includeRetired: true }).length })) };
+        return {
+          rooms: lifecycle.list().map((room) => ({
+            ...room,
+            members: store.listMembers(room.id, { includeRetired: true }).length,
+          })),
+        };
+      }
+
+      /* ------------------------------------------------------------ *
+       * project lifecycle
+       * ------------------------------------------------------------ */
+      case 'room.project.list': {
+        return { projects: lifecycle.list() };
+      }
+
+      case 'room.project.inspect': {
+        return lifecycle.inspect(payload.roomId);
+      }
+
+      case 'room.project.cleanup.preview': {
+        return lifecycle.preview(payload.roomId);
+      }
+
+      case 'room.project.pause': {
+        return lifecycle.pause(payload.roomId, lifecycleInput('pause', payload));
+      }
+
+      case 'room.project.resume': {
+        return lifecycle.resume(payload.roomId, lifecycleInput('resume', payload));
+      }
+
+      case 'room.project.archive': {
+        return lifecycle.archive(payload.roomId, lifecycleInput('archive', payload));
+      }
+
+      case 'room.project.restore': {
+        return lifecycle.restore(payload.roomId, lifecycleInput('restore', payload));
+      }
+
+      case 'room.project.trash': {
+        return lifecycle.trash(payload.roomId, lifecycleInput('trash', payload));
+      }
+
+      case 'room.project.purge': {
+        return lifecycle.purge(payload.roomId, {
+          ...lifecycleInput('purge', payload),
+          confirmTitle: typeof payload.confirmTitle === 'string' ? payload.confirmTitle : '',
+          acknowledgeIrreversible: payload.acknowledgeIrreversible === true,
+          operationScopeDigest: typeof payload.operationScopeDigest === 'string' ? payload.operationScopeDigest : null,
+        });
+      }
+
+      case 'room.project.reconcile': {
+        return lifecycle.reconcile(payload.roomId, lifecycleInput('reconcile', payload));
+      }
+
+      case 'room.project.cancel': {
+        return lifecycle.cancel(payload.roomId, lifecycleInput('cancel', payload));
+      }
+
+      /* ------------------------------------------------------------ *
+       * deep research deep research
+       * ------------------------------------------------------------ */
+      case 'room.research.list': {
+        return { research: requireResearch().summary(payload.roomId) };
+      }
+
+      case 'room.research.get': {
+        return { research: requireResearch().summary(payload.roomId) };
+      }
+
+      case 'room.research.propose': {
+        const member = requireActor(payload);
+        return requireResearch().propose({
+          roomId: payload.roomId,
+          actorId: member.id,
+          sourceMessageId: payload.sourceMessageId ?? null,
+          topic: payload.topic,
+          objective: payload.objective,
+          justification: payload.justification,
+          hypotheses: payload.hypotheses ?? [],
+          expectedArtifacts: payload.expectedArtifacts ?? [],
+          participantPlan: payload.participantPlan ?? payload.participantIds ?? [],
+          allowedPaths: payload.allowedPaths ?? [],
+          excludedPaths: payload.excludedPaths ?? [],
+          modelProfileRefs: payload.modelProfileRefs ?? [],
+          budget: payload.budget ?? {},
+          idempotencyKey: payload.idempotencyKey,
+        });
+      }
+
+      case 'room.research.approve': {
+        const humanId = researchHumanActor(payload.roomId);
+        return requireResearch().approve({
+          researchId: payload.researchId,
+          expectedProposalRevision: payload.expectedProposalRevision,
+          scopeDigest: payload.scopeDigest,
+          approvedBy: humanId,
+          idempotencyKey: payload.idempotencyKey,
+          channelRef: 'authenticated-ui',
+        });
+      }
+
+      case 'room.research.reject': {
+        const humanId = researchHumanActor(payload.roomId);
+        return requireResearch().reject({
+          researchId: payload.researchId,
+          expectedProposalRevision: payload.expectedProposalRevision,
+          scopeDigest: payload.scopeDigest,
+          approvedBy: humanId,
+          idempotencyKey: payload.idempotencyKey,
+          reason: payload.reason ?? null,
+          channelRef: 'authenticated-ui',
+        });
+      }
+
+      case 'room.research.cancel': {
+        const humanId = researchHumanActor(payload.roomId);
+        return requireResearch().cancel({
+          researchId: payload.researchId,
+          actorId: humanId,
+          reason: payload.reason ?? null,
+        });
+      }
+
+      case 'room.research.revise': {
+        const member = requireActor(payload);
+        return requireResearch().revise({
+          researchId: payload.researchId,
+          actorId: member.id,
+          allowedPaths: payload.allowedPaths,
+          excludedPaths: payload.excludedPaths,
+          participantPlan: payload.participantPlan,
+          modelProfileRefs: payload.modelProfileRefs,
+          budget: payload.budget,
+        });
+      }
+
+      case 'room.research.start': {
+        return requireResearch().start({ researchId: payload.researchId });
+      }
+
+      case 'room.research.pause': {
+        researchHumanActor(payload.roomId);
+        return requireResearch().pause({ researchId: payload.researchId, reason: payload.reason ?? '用户暂停', actorId: researchHumanActor(payload.roomId) });
+      }
+
+      case 'room.research.resume': {
+        researchHumanActor(payload.roomId);
+        return requireResearch().resume({ researchId: payload.researchId });
+      }
+
+      case 'room.research.stop': {
+        researchHumanActor(payload.roomId);
+        return requireResearch().stop({ researchId: payload.researchId, reason: payload.reason ?? '用户停止', actorId: researchHumanActor(payload.roomId) });
+      }
+
+      case 'room.research.report': {
+        return { research: requireResearch().summary(payload.roomId) };
+      }
+
+      case 'room.research.experience': {
+        return { experience: requireResearch().listExperience(payload.roomId) };
+      }
+
+      case 'room.research.sessions': {
+        return { sessions: requireResearch().listSessions(payload.roomId) };
+      }
+
+      case 'room.research.flowback': {
+        const member = requireActor(payload);
+        return requireResearch().flowBack({ researchId: payload.researchId, actorId: member.id });
+      }
+
+      case 'room.research.reconcile': {
+        const humanId = researchHumanActor(payload.roomId);
+        return requireResearch().reconcile({ researchId: payload.researchId, actorId: humanId });
       }
 
       case 'room.get': {
@@ -178,35 +428,25 @@ export function registerRoomRoute(services) {
             isolation: workspace.isolationFor(payload.roomId),
             snapshot: workspace.snapshotPlan(payload.roomId),
           },
+          research: research ? research.summary(payload.roomId) : { enabled: false },
         };
       }
 
       case 'room.update': {
+        if (payload.status !== undefined) {
+          throw new RoomError('INVALID_REQUEST', '项目状态必须使用 room.project.* 生命周期操作；这些操作会记录版本、幂等键与审计日志。');
+        }
+        rooms.assertWritable(payload.roomId, '修改项目');
         const updated = store.updateRoom(payload.roomId, {
           ...(payload.title === undefined ? {} : { title: payload.title }),
-          ...(payload.status === undefined ? {} : { status: payload.status }),
           ...(payload.workspaceRef === undefined ? {} : { workspaceRef: payload.workspaceRef }),
           ...(payload.config === undefined ? {} : { config: { ...rooms.requireRoom(payload.roomId).config, ...payload.config } }),
         });
-        // Coming back to `active` has to wake the members up. Recovery deliberately
-        // skips paused/archived rooms (so a restart cannot bring them back to life),
-        // which leaves them with no live sessions; without this step a resumed project
-        // accepted input but every delivery parked as "该成员当前没有活动会话".
-        if (payload.status === 'active') {
-          const members = store.listMembers(payload.roomId, { includeRetired: false });
-          for (const member of members) {
-            if (member.kind !== 'agent' || member.status === 'offline') continue;
-            try {
-              await ensureMemberSession({ memberId: member.id, roomId: payload.roomId });
-            } catch (error) {
-              logger?.warn?.(`[project-room] resume ${member.id} on project activate failed: ${error?.message ?? error}`);
-            }
-          }
-        }
         return { room: updated };
       }
 
       case 'room.member.add': {
+        rooms.assertWritable(payload.roomId, '添加成员');
         const result = await rooms.ensureMember({
           roomId: payload.roomId,
           role: payload.role ?? 'custom',
@@ -222,10 +462,14 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.member.update': {
+        const target = store.getMember(payload.memberId);
+        if (target) rooms.assertWritable(target.roomId, '修改成员');
         return { member: rooms.updateMember({ memberId: payload.memberId, patch: payload.patch ?? {}, expectedRevision: payload.expectedRevision }) };
       }
 
       case 'room.member.control': {
+        const target = store.getMember(payload.memberId);
+        if (target) rooms.assertWritable(target.roomId, '控制成员');
         const action_ = payload.control ?? payload.controlAction;
         if (action_ === 'pause') return { member: rooms.pauseMember(payload.memberId), state: 'paused' };
         if (action_ === 'resume') {
@@ -248,6 +492,8 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.member.model.set': {
+        const target = store.getMember(payload.memberId);
+        if (target) rooms.assertWritable(target.roomId, '修改成员模型');
         const result = await models.setMemberModel({
           memberId: payload.memberId,
           profileRef: payload.profileRef,
@@ -289,7 +535,7 @@ export function registerRoomRoute(services) {
           membershipRevision: payload.membershipRevision,
         });
 
-        // A user's explicit requirement change follows the full §13.3 path
+        // A user's explicit requirement change follows the full path
         // instead of being only a chat line.
         let decision = null;
         if (payload.asTaskChange && payload.taskId) {
@@ -346,6 +592,7 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.model.settings.set': {
+        rooms.assertWritable(payload.roomId, '修改项目模型');
         const room = rooms.requireRoom(payload.roomId);
         const next = { ...(room.config?.models ?? DEFAULT_ROOM_CONFIG.models), ...(payload.patch ?? {}) };
         if (next.selectionMode === 'allowed-pool' && (!Array.isArray(next.allowedProfileRefs) || next.allowedProfileRefs.length === 0)) {
@@ -429,6 +676,7 @@ export function registerRoomRoute(services) {
 
       case 'room.decision.accept': {
         const member = requireActor(payload);
+        rooms.assertWritable(payload.roomId, '提出决定');
         const decision = await decisions.propose({
           roomId: payload.roomId,
           actorId: member.id,
@@ -444,6 +692,7 @@ export function registerRoomRoute(services) {
 
       case 'room.decision.ack': {
         const member = requireActor(payload);
+        rooms.assertWritable(payload.roomId, '回报决定同步');
         return { ack: decisions.ack({ roomId: payload.roomId, actorId: member.id, decisionId: payload.decisionId, state: payload.state, appliedTaskRevision: payload.appliedTaskRevision ?? null, detail: payload.detail ?? null }) };
       }
 
@@ -476,10 +725,12 @@ export function registerRoomRoute(services) {
        * Execution and recovery
        * ------------------------------------------------------------ */
       case 'room.workspace.prepare': {
+        rooms.assertActive(payload.roomId, '准备执行工作区');
         return workspace.prepareWorktree({ roomId: payload.roomId, taskId: payload.taskId, attemptId: payload.attemptId, actorId: payload.actorId });
       }
 
       case 'room.workspace.integration': {
+        rooms.assertActive(payload.roomId, '查看集成计划');
         return workspace.integrationPlan({ roomId: payload.roomId, taskId: payload.taskId, attemptId: payload.attemptId });
       }
 
@@ -488,12 +739,14 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.recovery.run': {
+        rooms.assertWritable(payload.roomId, '运行恢复');
         return recovery.recoverRoom(payload.roomId);
       }
 
       case 'room.delivery.retry': {
         const message = store.getMessage(payload.messageId);
         if (!message) throw new RoomError('NOT_FOUND', `消息 ${payload.messageId} 不存在。`);
+        rooms.assertActive(message.roomId, '重试投递');
         const author = store.getMember(message.authorId);
         const board = await delivery.schedule({ message, author, mode: 'queue' });
         return { results: board };
@@ -504,6 +757,7 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.loop.resume': {
+        rooms.assertActive(payload.roomId, '恢复自动唤醒');
         guard.resume(payload.roomId, payload.causalRootId);
         return { resumed: true };
       }
@@ -535,7 +789,7 @@ export function registerRoomRoute(services) {
    * The client sends the member it believes it is acting as; the server checks
    * that the claim matches a real member of the room. A mismatch is refused
    * rather than silently rewritten, because "silently rewritten" is how a
-   * forged author would succeed (the design notes).
+   * forged author would succeed.
    * @param {object} payload
    * @returns {object}
    */

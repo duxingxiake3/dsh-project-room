@@ -1,17 +1,16 @@
 /**
  * Project Room — workspace and write coordination.
  *
- * the design notes asks for two things that are easy to fake and therefore worth
+ * two things matter here because they are easy to fake and therefore worth
  * implementing carefully:
  *
  *   - **Isolation where it is real.** When the project is a git repository, each
  *     write attempt gets its own worktree and branch, and the plugin records the
  *     baseline commit, branch, path, attempt id and owner. Cross-worktree
- *     references use `repoId + commit/diff + relative path`, never an absolute path
- *     (the design notes).
+ *     references use `repoId + commit/diff + relative path`, never an absolute path.
  *   - **Honesty where it is not.** When worktrees are unavailable — no git, a
  *     dirty index, a failed `git worktree add` — the plugin says so and serializes
- *     write attempts instead of claiming isolation it does not have (§15.2).
+ *     write attempts instead of claiming isolation it does not have.
  *
  * @module dsh-project-room/src/host/workspace/coordinator
  */
@@ -150,7 +149,7 @@ export class WorkspaceCoordinator {
         .filter(Boolean);
       // `git status` prints `old -> new` for a rename; the integration tree needs
       // one entry for the new path plus the source it came from, never two
-      // unrelated-looking files (the design notes).
+      // unrelated-looking files.
       const { changed, renamedFrom } = splitChanges(status);
       const diffStat = this.#git(path, ['diff', '--stat', repo.head]).trim();
       return {
@@ -179,8 +178,7 @@ export class WorkspaceCoordinator {
 
   /**
    * Integration checks before a change may be merged into the integration tree.
-   * It reports what must be verified; it does not merge anything on its own
-   * (the design notes).
+   * It reports what must be verified; it does not merge anything on its own.
    * @param {object} input
    * @param {string} input.roomId
    * @param {string} input.taskId
@@ -214,7 +212,7 @@ export class WorkspaceCoordinator {
 
   /**
    * Release the write lane for a task. Worktrees are deliberately KEPT: a failed
-   * or departed member's unmerged changes must not be deleted (the design notes).
+   * or departed member's unmerged changes must not be deleted.
    * @param {string} taskId
    * @returns {{ released: boolean, keptWorktree: string | null }}
    */
@@ -279,7 +277,7 @@ export class WorkspaceCoordinator {
    * With real worktree isolation there is nothing to claim; without it this lane
    * is the ONLY thing preventing two members from writing the same tree at once,
    * so it must reject both "another attempt on this task" and "another task is
-   * already writing" (the design notes).
+   * already writing".
    *
    * @param {string} taskId
    * @param {string} attemptId
@@ -316,8 +314,7 @@ export class WorkspaceCoordinator {
   /**
    * Whether two in-flight attempts touch the same path. This is the *plugin's*
    * declaration of overlap, not a filesystem lock: without real isolation it
-   * cannot stop every shell write, and saying otherwise would be a lie
-   * (the design notes).
+   * cannot stop every shell write, and saying otherwise would be a lie.
    */
   #detectConflicts(roomId, taskId, changedPaths) {
     const conflicts = [];

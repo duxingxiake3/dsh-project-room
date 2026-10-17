@@ -6,8 +6,7 @@
  *
  *   1. **The server binds the caller.** `roomId` is derived from the calling
  *      agent's session, never from an argument, and no tool accepts a sender id.
- *      A model cannot claim to be someone else, and cannot reach another room
- *      (the design notes, §18).
+ *      A model cannot claim to be someone else, and cannot reach another room.
  *   2. **Arguments are plain JSON Schema.** The Host's registry enforces
  *      `parameters` and the declared output schema; the tool body additionally
  *      validates what JSON Schema cannot express (revisions, membership).
@@ -39,7 +38,13 @@ import { detectDependencyCycle } from '../room/loop-guard.js';
  * @returns {object[]}
  */
 export function buildRoomTools(services) {
-  const { rooms, messages, models, tasks, planning, decisions, artifacts, memberOfSession } = services;
+  const { rooms, messages, models, tasks, planning, decisions, artifacts, research, memberOfSession, researchSessionOf } = services;
+
+  /** Fail loudly if the composition did not mount research. */
+  const requireResearch = () => {
+    if (!research) throw new RoomError('RESEARCH_DISABLED', '深度研究服务未装配。');
+    return research;
+  };
 
   /**
    * Resolve the calling member from the tool execution context.
@@ -48,7 +53,7 @@ export function buildRoomTools(services) {
    */
   const callerOf = (exec) => {
     const sessionId = exec?.agent?.id ?? exec?.agent?.session?.id ?? null;
-    const member = sessionId ? memberOfSession(sessionId) : null;
+    const member = sessionId ? (researchSessionOf?.(sessionId) ?? memberOfSession(sessionId)) : null;
     if (!member) {
       throw new RoomError(
         'NOT_A_ROOM_MEMBER',
@@ -414,7 +419,7 @@ export function buildRoomTools(services) {
       async execute(args, exec) {
         const member = callerOf(exec);
         // A user-specified owner always wins; a non-coordinator may only take
-        // work for themselves (the design notes).
+        // work for themselves.
         if (member.role !== 'coordinator' && args.memberId !== member.id) {
           throw new RoomError('FORBIDDEN', '只有主代理可以转派别人的任务；你可以直接向对方提出协作请求。');
         }
@@ -698,6 +703,219 @@ export function buildRoomTools(services) {
           failures: args.failures ?? [],
           note: args.note ?? null,
         });
+      },
+    },
+    {
+      name: 'room_research_propose',
+      description:
+        '当项目存在多个合理架构、根因不明或需要受控实验时，主代理可以提出一次深度研究提议。这个工具只创建“待用户批准”的提议卡，绝不启动研究、不派发研究任务、不产生研究模型调用。真实用户批准后才会进入下一步。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['topic', 'objective', 'justification', 'participantIds', 'allowedPaths'],
+        properties: {
+          topic: { type: 'string', description: '研究主题。' },
+          objective: { type: 'string', description: '要验证的假设、成功标准与不变量。' },
+          justification: { type: 'string', description: '为什么普通流程不够，以及预期收益。' },
+          hypotheses: { type: 'array', items: { type: 'string' }, description: '初步假设。' },
+          expectedArtifacts: { type: 'array', items: { type: 'string' }, description: '预期产物。' },
+          participantIds: { type: 'array', items: { type: 'string' }, description: '参与研究的成员 id。' },
+          allowedPaths: { type: 'array', items: { type: 'string' }, description: '研究允许读取/试验的项目路径；服务端会规范化并校验，不能越出项目工作区或进入插件源码。' },
+          excludedPaths: { type: 'array', items: { type: 'string' }, description: '明确排除的路径。' },
+          budget: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              maxModelCalls: { type: 'integer', description: '模型调用硬上限。' },
+              maxTotalTokens: { type: 'integer', description: 'Token 硬上限。' },
+              maxWallClockMs: { type: 'integer', description: '最长时长（毫秒）。' },
+              maxExperimentRuns: { type: 'integer', description: '实验次数硬上限。' },
+              maxParallelAgents: { type: 'integer', description: '最大并行成员数。' },
+            },
+          },
+        },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      async execute(args, exec) {
+        const member = coordinatorOf(exec);
+        const result = await requireResearch().propose({
+          roomId: member.roomId,
+          actorId: member.id,
+          topic: args.topic,
+          objective: args.objective,
+          justification: args.justification,
+          hypotheses: args.hypotheses ?? [],
+          expectedArtifacts: args.expectedArtifacts ?? [],
+          participantPlan: args.participantIds ?? args.participantPlan ?? [],
+          allowedPaths: args.allowedPaths ?? [],
+          excludedPaths: args.excludedPaths ?? [],
+          budget: args.budget ?? {},
+        });
+        return { ...result, research: requireResearch().summary(member.roomId) };
+      },
+    },
+
+    {
+      name: 'room_research_get',
+      description: '读取当前项目的研究提议、批准状态、运行状态、预算、假设、实验、发现与结论。只读，不会启动研究。',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      execute(_args, exec) {
+        const member = callerOf(exec);
+        return { research: requireResearch().summary(member.roomId) };
+      },
+    },
+
+    {
+      name: 'room_research_start',
+      description:
+        '主代理在用户已经批准当前提议后启动研究。ResearchGate 会再次核对批准、scopeDigest、项目计划版本和剩余预算；没有有效批准时拒绝。不要用普通聊天声称“已经批准”来绕过它。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['researchId'],
+        properties: { researchId: { type: 'string' } },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      async execute(args, exec) {
+        coordinatorOf(exec);
+        return requireResearch().start({ researchId: args.researchId });
+      },
+    },
+
+    {
+      name: 'room_research_hypothesis',
+      description: '在已批准且 RUNNING 的研究中提交一条可证伪的独立假设。必须先由真实用户批准本次研究；不能把普通讨论伪装成研究。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['researchId', 'claim'],
+        properties: {
+          researchId: { type: 'string' },
+          claim: { type: 'string' },
+          predictedEffect: { type: 'string' },
+          falsificationTest: { type: 'string' },
+          evidenceRefs: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      execute(args, exec) {
+        const member = callerOf(exec);
+        return requireResearch().hypothesis({ researchId: args.researchId, actorId: member.id, claim: args.claim, predictedEffect: args.predictedEffect, falsificationTest: args.falsificationTest, evidenceRefs: args.evidenceRefs });
+      },
+    },
+
+    {
+      name: 'room_research_experiment',
+      description: '登记一次真实研究实验的命令、基线/候选 commit、指标与证据。每次登记都会占用获批的实验次数预算；超预算、范围失效或研究未运行时拒绝。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['researchId', 'commandRefs'],
+        properties: {
+          researchId: { type: 'string' },
+          hypothesisId: { type: 'string' },
+          baselineCommit: { type: 'string' },
+          candidateCommit: { type: 'string' },
+          environmentRef: { type: 'string' },
+          commandRefs: { type: 'array', items: { type: 'string' }, description: '真实执行过的命令或可复现步骤。' },
+          metrics: { type: 'object', description: '可核对的测试/性能指标。' },
+          artifactRefs: { type: 'array', items: { type: 'string' } },
+          idempotencyKey: { type: 'string' },
+        },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      execute(args, exec) {
+        const member = callerOf(exec);
+        return requireResearch().experiment({
+          researchId: args.researchId,
+          actorId: member.id,
+          hypothesisId: args.hypothesisId,
+          baselineCommit: args.baselineCommit,
+          candidateCommit: args.candidateCommit,
+          environmentRef: args.environmentRef,
+          commandRefs: args.commandRefs,
+          metrics: args.metrics,
+          artifactRefs: args.artifactRefs,
+          idempotencyKey: args.idempotencyKey,
+        });
+      },
+    },
+
+    {
+      name: 'room_research_finding',
+      description: '在研究提交一条发现，必须标注证据级别（fact / reproducible / hypothesis / unverified）。讨论票数和模型自述不能写成已验证事实。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['researchId', 'issue', 'evidenceLevel'],
+        properties: {
+          researchId: { type: 'string' },
+          issue: { type: 'string' },
+          evidenceLevel: { type: 'string', enum: ['fact', 'reproducible', 'hypothesis', 'unverified'] },
+          supportingRefs: { type: 'array', items: { type: 'string' } },
+          counterRefs: { type: 'array', items: { type: 'string' } },
+          recommendation: { type: 'string' },
+          uncertainty: { type: 'string' },
+        },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      execute(args, exec) {
+        const member = callerOf(exec);
+        return requireResearch().finding({ researchId: args.researchId, actorId: member.id, ...args });
+      },
+    },
+
+    {
+      name: 'room_research_report',
+      description: '主代理结束研究并提交结论：improved / no_change / inconclusive / rejected_candidate。improved 必须同时有基线证据和回归证据；不能用讨论结论冒充实测结果。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['researchId', 'decision'],
+        properties: {
+          researchId: { type: 'string' },
+          decision: { type: 'string', enum: ['improved', 'no_change', 'inconclusive', 'rejected_candidate'] },
+          chosenCandidateRef: { type: 'string' },
+          baselineEvidenceRefs: { type: 'array', items: { type: 'string' } },
+          regressionEvidenceRefs: { type: 'array', items: { type: 'string' } },
+          remainingRisks: { type: 'array', items: { type: 'string' } },
+          reusableLesson: { type: 'string' },
+          applicability: { type: 'string' },
+          pitfalls: { type: 'string' },
+        },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      execute(args, exec) {
+        coordinatorOf(exec);
+        return requireResearch().complete({
+          researchId: args.researchId,
+          decision: args.decision,
+          chosenCandidateRef: args.chosenCandidateRef,
+          baselineEvidenceRefs: args.baselineEvidenceRefs,
+          regressionEvidenceRefs: args.regressionEvidenceRefs,
+          remainingRisks: args.remainingRisks,
+          reusableLesson: args.reusableLesson,
+          applicability: args.applicability,
+          pitfalls: args.pitfalls,
+        });
+      },
+    },
+
+    {
+      name: 'room_research_flowback',
+      description:
+        '主代理把已完成的研究结论回流到项目：写一条带来源的 Decision；如果结论是 improved，再创建一张集成 Task（不自动合并、不自动部署）。每个研究只能回流一次。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['researchId'],
+        properties: { researchId: { type: 'string' } },
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: renderJson(value) }] },
+      async execute(args, exec) {
+        const member = coordinatorOf(exec);
+        return requireResearch().flowBack({ researchId: args.researchId, actorId: member.id });
       },
     },
   ];

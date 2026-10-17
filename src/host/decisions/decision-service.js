@@ -4,7 +4,7 @@
  * A "decision" is the unit that makes requirement changes survivable. When a
  * user changes their mind, the change becomes a new revision with a source, the
  * affected tasks are marked `needsSync`, the affected members are notified, and
- * each one reports back what actually happened on their side (the design notes).
+ * each one reports back what actually happened on their side.
  *
  * Two rules keep this from being theatre:
  *
@@ -58,7 +58,7 @@ export class DecisionService {
    * @returns {Promise<object>}
    */
   async propose(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertWritable(input.roomId, '提出决定');
     const actor = this.rooms.requireMember(input.actorId);
     if (!input.statement || !String(input.statement).trim()) {
       throw new RoomError('INVALID_REQUEST', '决定内容不能为空。');
@@ -135,7 +135,7 @@ export class DecisionService {
           const task = this.store.getTask(taskId);
           if (!task) continue;
           // A task that would keep producing the old shape must not be
-          // submittable as an accepted result (the design notes step 6).
+          // submittable as an accepted result.
           this.store.updateTask(task.id, { needsSync: true, decisionRevision: created.revision });
         }
         for (const taskId of new Set([...affected, ...impacted.direct, ...impacted.inferred])) {
@@ -184,7 +184,7 @@ export class DecisionService {
    * @returns {object}
    */
   ack(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertWritable(input.roomId, '回报决定同步');
     const actor = this.rooms.requireMember(input.actorId);
     const decision = this.store.getDecision(input.decisionId);
     if (!decision || decision.roomId !== room.id) throw new RoomError('NOT_FOUND', `决定 ${input.decisionId} 不存在。`);
@@ -246,7 +246,7 @@ export class DecisionService {
 
   /**
    * A user's direct instruction, recorded as an accepted requirement plus its
-   * deterministic impact. This is the programmatic form of the design notes.
+   * deterministic impact. This is the programmatic form of these rules.
    *
    * @param {object} input
    * @param {string} input.roomId
@@ -299,7 +299,7 @@ export class DecisionService {
    *
    * Only dependency edges this plugin actually knows are "direct". Anything
    * inferred from the scope keyword is reported separately as `inferred`, because
-   * claiming a complete impact graph would be a lie (§13.3 step 5).
+   * claiming a complete impact graph would be a lie.
    * @param {string} roomId
    * @param {string[]} explicit
    * @param {string} scope

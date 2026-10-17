@@ -6,10 +6,16 @@
 
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { after, before, describe, it } from 'node:test';
 
 import { RoomError, isoTimestamp } from '../../shared/contracts.js';
 import { RoomStore, SCHEMA_VERSION, payloadHash, temporaryDatabasePath } from '../../src/host/storage/store.js';
+
+const DEMO_WORKSPACE = join(tmpdir(), 'project-room-demo');
+const LEGACY_WORKSPACE = join(tmpdir(), 'project-room-legacy');
 
 /** @type {RoomStore} */
 let store;
@@ -34,7 +40,7 @@ after(() => {
 });
 
 function createRoom(id = 'room_test') {
-  return store.insertRoom({ id, title: '测试项目群', ownerRef: 'user_local', workspaceRef: 'E:\\demo' });
+  return store.insertRoom({ id, title: '测试项目群', ownerRef: 'user_local', workspaceRef: DEMO_WORKSPACE });
 }
 
 describe('store — rooms, members and aliases', () => {
@@ -357,5 +363,111 @@ describe('store — room status is a closed set', () => {
       (error) => error instanceof RoomError && error.code === 'INVALID_REQUEST',
     );
     assert.equal(store.getRoom('room_status_bad').status, 'active', 'a refused write must not change the row');
+  });
+
+  it('accepts the transient lifecycle fences but refuses an unknown fine state', () => {
+    createRoom('room_state_ok');
+    for (const status of ['quiescing', 'purging', 'trashed', 'archived', 'paused', 'active']) {
+      assert.equal(store.updateRoom('room_state_ok', { status }).status, status);
+    }
+    assert.equal(store.updateRoom('room_state_ok', { lifecycleState: 'BLOCKED' }).lifecycleState, 'BLOCKED');
+    assert.equal(store.updateRoom('room_state_ok', { lifecycleState: 'PURGE_BLOCKED' }).lifecycleState, 'PURGE_BLOCKED');
+    assert.throws(
+      () => store.updateRoom('room_state_ok', { lifecycleState: 'DELETED' }),
+      (error) => error instanceof RoomError && error.code === 'INVALID_REQUEST',
+    );
+    assert.throws(
+      () => store.updateRoom('room_state_ok', { lifecycleEpoch: -1 }),
+      (error) => error instanceof RoomError && error.code === 'INVALID_REQUEST',
+    );
+  });
+});
+
+describe('store — resource ownership ledger (resource ownership)', () => {
+  it('keeps one row per canonical identity and counts distinct project shares', () => {
+    createRoom('room_res_a');
+    createRoom('room_res_b');
+    const resource = store.upsertResource({
+      roomId: 'room_res_a',
+      kind: 'workspace',
+      provenance: 'user-workspace',
+      canonicalPath: DEMO_WORKSPACE,
+      ownership: 'borrowed',
+      safeDeleteStatus: 'protected',
+    });
+    assert.equal(resource.refCount, 0);
+    assert.equal(store.linkResource(resource.id, 'room_res_a').refCount, 1);
+    const linked = store.linkResource(resource.id, 'room_res_b');
+    assert.equal(linked.refCount, 2);
+    assert.equal(linked.resource.ownership, 'shared');
+    const noDuplicate = store.linkResource(resource.id, 'room_res_b');
+    assert.equal(noDuplicate.linked, false);
+    assert.equal(noDuplicate.refCount, 2, '重复链接同一项目不制造第二个引用');
+
+    const released = store.releaseResourceShare(resource.id, 'room_res_b');
+    assert.equal(released.refCount, 1);
+    assert.equal(released.safeDeleteStatus, 'protected', '用户工作区释放共享后仍然受保护');
+    assert.equal(store.findResource({ kind: 'workspace', canonicalPath: DEMO_WORKSPACE }).id, resource.id, '身份匹配不是前缀匹配');
+  });
+
+  it('marks a released owned resource and keeps the audit row queryable', () => {
+    createRoom('room_res_owned');
+    const resource = store.upsertResource({
+      roomId: 'room_res_owned',
+      kind: 'member-session',
+      provenance: 'host-session',
+      hostRef: 'session-owned-1',
+      ownership: 'owned',
+      safeDeleteStatus: 'deletable',
+      evidenceRef: 'member:member_x',
+    });
+    store.linkResource(resource.id, 'room_res_owned');
+    const released = store.releaseResourceShare(resource.id, 'room_res_owned');
+    assert.equal(released.refCount, 0);
+    assert.equal(released.safeDeleteStatus, 'released');
+    assert.ok(store.getResource(resource.id), '释放记录保留，供删除审计引用');
+
+    const audit = store.insertDeletionAudit({
+      operationId: 'op_audit_1',
+      projectId: 'room_res_owned',
+      humanActorRef: 'member_human',
+      result: 'blocked',
+      failedRefs: [{ resourceId: resource.id }],
+    });
+    assert.equal(audit.result, 'blocked');
+    assert.deepEqual(audit.failedRefs, [{ resourceId: resource.id }]);
+    assert.equal(store.listDeletionAudits('room_res_owned').length, 1);
+  });
+});
+
+describe('store — v7 → v8 lifecycle migration', () => {
+  it('derives the lifecycle state from a legacy status without merging projects', () => {
+    const legacyFile = temporaryDatabasePath();
+    const lockFile = `${legacyFile}.lock`;
+    const writer = new RoomStore({ file: legacyFile, lockFile });
+    writer.open();
+    writer.insertRoom({ id: 'room_legacy_a', title: '旧项目 A', ownerRef: 'user_local', workspaceRef: LEGACY_WORKSPACE });
+    writer.insertRoom({ id: 'room_legacy_b', title: '旧项目 A', ownerRef: 'user_local', workspaceRef: LEGACY_WORKSPACE });
+    writer.updateRoom('room_legacy_a', { status: 'archived' });
+    writer.updateRoom('room_legacy_b', { status: 'paused' });
+    writer.close();
+
+    const raw = new DatabaseSync(legacyFile);
+    raw.exec("update meta set value = '7' where key = 'schemaVersion'");
+    raw.exec("update room set lifecycle_state = 'ACTIVE'");
+    raw.close();
+
+    const reopened = new RoomStore({ file: legacyFile, lockFile });
+    reopened.open();
+    try {
+      assert.equal(reopened.getMeta('schemaVersion'), String(SCHEMA_VERSION));
+      assert.equal(reopened.getRoom('room_legacy_a').lifecycleState, 'ARCHIVED');
+      assert.equal(reopened.getRoom('room_legacy_b').lifecycleState, 'PAUSED');
+      assert.equal(reopened.getRoom('room_legacy_a').status, 'archived');
+      assert.equal(reopened.listRooms().filter((room) => room.title === '旧项目 A').length, 2, '同名旧项目不被合并');
+    } finally {
+      reopened.close();
+      for (const suffix of ['', '.lock', '-wal', '-shm']) rmSync(`${legacyFile}${suffix}`, { force: true });
+    }
   });
 });

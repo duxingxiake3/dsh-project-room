@@ -5,8 +5,8 @@
  * fake host only stands in for the Harness runtime, and it is deliberately able
  * to lose an input identity so "the host cannot confirm" is testable.
  *
- * Acceptance cases covered here: AT15, AT16, AT26, AT28, AT31, AT33, AT35, plus
- * the restart/recovery sequence of the design notes.
+ * The behaviours covered here are grouped by failure window; the restart and
+ * recovery sequence is exercised at the end.
  */
 
 import assert from 'node:assert/strict';
@@ -37,7 +37,7 @@ function eventsOfType(stack, roomId, eventType) {
     .map((row) => ({ seq: row.seq, payload: JSON.parse(row.payload) }));
 }
 
-describe('project room — crash between save and admission (AT15)', () => {
+describe('project room — crash between save and admission', () => {
   it('keeps the message and delivers it on the next reconcile', async (t) => {
     // Delivery disabled: "the message is saved" and "the host admitted it" are
     // two different facts, and this models the gap between them.
@@ -74,7 +74,7 @@ describe('project room — crash between save and admission (AT15)', () => {
   });
 });
 
-describe('project room — crash between admission and receipt (AT16)', () => {
+describe('project room — crash between admission and receipt', () => {
   it('stays uncertain unless the host can prove absence', async (t) => {
     const stack = createRoomStack();
     t.after(() => stack.close());
@@ -127,7 +127,7 @@ describe('project room — crash between admission and receipt (AT16)', () => {
   });
 });
 
-describe('project room — pause, resume and retire (AT26/AT28)', () => {
+describe('project room — pause, resume and retire', () => {
   it('keeps messages while paused, syncs versions on resume, and hands over on retire', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
 
@@ -225,7 +225,7 @@ describe('project room — pause, resume and retire (AT26/AT28)', () => {
     assert.deepEqual(
       afterRetire.message.deliveries.map((entry) => entry.recipientId),
       [agents.coordinator.id],
-      '点名无法解析时按普通文本处理：用户未点名的消息默认由主代理接收（the design notes）',
+      '点名无法解析时按普通文本处理：用户未点名的消息默认由主代理接收',
     );
     assert.ok(afterRetire.warnings.some((warning) => warning.includes('无法识别')));
     assert.equal(deliveryCountOf(stack, devops.id), devopsDelivered, '退出之后不会再收到任何投递');
@@ -253,7 +253,7 @@ describe('project room — pause, resume and retire (AT26/AT28)', () => {
     assert.equal(afterResume.message.deliveries[0].status, 'accepted', '显式恢复后照常投递');
     assert.equal(deliveryCountOf(stack, agents.tester.id), testerBefore + 1);
 
-    // --- AT28: unloading must not stop work or lose state ------------------
+    // --- : unloading must not stop work or lose state ------------------
     const beforeUnload = stack.store.getTask(buildTask.id);
     const timelineBefore = stack.store.listMessages(room.id).map((message) => message.id);
     await stack.close();
@@ -270,7 +270,7 @@ describe('project room — pause, resume and retire (AT26/AT28)', () => {
   });
 });
 
-describe('project room — honest delivered/read states (AT31)', () => {
+describe('project room — honest delivered/read states', () => {
   it('says "delivered, not read" until the host really observes a claim', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
     assert.equal(DELIVERY_LABELS.accepted, '已送达，尚未确认取用');
@@ -309,7 +309,7 @@ describe('project room — honest delivered/read states (AT31)', () => {
   });
 });
 
-describe('project room — a native permission wait is not a chat approval (AT33)', () => {
+describe('project room — a native permission wait is not a chat approval', () => {
   it('leaves task state untouched when a member is waiting for the host', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
 
@@ -350,7 +350,7 @@ describe('project room — a native permission wait is not a chat approval (AT33
   });
 });
 
-describe('project room — single writer (AT35)', () => {
+describe('project room — single writer', () => {
   it('refuses a second writer for the same database and keeps the first working', async (t) => {
     const stack = createRoomStack();
     t.after(() => stack.close());

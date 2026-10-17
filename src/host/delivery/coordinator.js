@@ -1,11 +1,11 @@
 /**
  * Project Room — delivery coordinator.
  *
- * Delivery is a ledger, not a second queue (the design notes): the room database
+ * Delivery is a ledger, not a second queue: the room database
  * says "this group message was saved", the host inbox says "this input was
  * admitted", and a `Delivery` row records what actually happened between them.
  *
- * The states are the product's honesty mechanism (§10.5). In particular:
+ * The states are the product's honesty mechanism. In particular:
  *
  *   - `accepted` means the host took the input. It does NOT mean the member read
  *     it, so the UI says "已送达，尚未确认取用".
@@ -121,18 +121,21 @@ export class DeliveryCoordinator {
         continue;
       }
 
-      // Archive is "stop automatic execution, keep history" (the design notes) — the same
+      // Archive is "stop automatic execution, keep history" — the same
       // gate as pause, with wording that says which state did it. Before this,
       // `archived` was not checked at all: an archived project would keep waking its
       // members on every mention.
       if (room.status !== 'active') {
         const archived = room.status === 'archived';
+        const trashed = room.status === 'trashed';
         const updated = this.store.upsertDelivery({
           ...delivery,
           status: 'paused',
-          detail: archived
-            ? '项目已归档：保留历史与源码，不再自动执行；恢复后由你决定何时继续。'
-            : '项目已暂停，聊天仍可查看并输入，但不会静默恢复执行。',
+          detail: trashed
+            ? '项目在回收站：不再投递新工作；恢复项目后由你决定是否继续。'
+            : archived
+              ? '项目已归档：保留历史与源码，不再自动执行；恢复后由你决定何时继续。'
+              : '项目已暂停，聊天仍可查看并输入，但不会静默恢复执行。',
           updatedAt: isoTimestamp(),
         });
         results.push(this.#view(recipient.id, recipient.displayName, updated.status, updated.detail));
@@ -294,8 +297,8 @@ export class DeliveryCoordinator {
    * only meaningful, and only truthful, when the host supports step boundaries and
    * the member is actually mid-turn. For an idle member the same call would be an
    * ordinary next turn, so the recorded mode says `queue` — the point is that the
-   * timeline shows what really happened, not what was preferred (the design notes,
-   * AT13).
+   * timeline shows what really happened, not what was preferred.
+   *
    *
    * @param {'queue' | 'steer'} mode
    * @param {object} recipient
@@ -362,7 +365,7 @@ export class DeliveryCoordinator {
   /**
    * Record that a member produced an answer to the input it consumed, so the
    * delivery reaches `replied` — which is evidence of a reply, never of
-   * completion (the design notes).
+   * completion.
    * @param {string} messageId
    * @param {string} memberId
    */
@@ -385,7 +388,7 @@ export class DeliveryCoordinator {
   /**
    * Reconcile uncertain deliveries after a restart.
    *
-   * The order matters (the design notes): ask the host, use the same identity to
+   * The order matters: ask the host, use the same identity to
    * restore admission when it is still queued, retry only when absence is proven,
    * and otherwise stay `uncertain` and stop auto-resending.
    *

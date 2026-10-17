@@ -1,7 +1,7 @@
 /**
  * Project Room — abnormal-loop guard.
  *
- * the design notes is explicit about two opposite failures, and this module exists to
+ * two opposite failures matter here, and this module exists to
  * avoid both:
  *
  *   - **Too strict.** A fixed "each pair may exchange two messages" rule, or
@@ -29,11 +29,11 @@ const COURTESY_PATTERNS = [
 /**
  * A bare acknowledgement with a short trailing clause, and nothing actionable in it.
  *
- * This case was missing, and the live AT39 trial showed what that costs: two members
+ * This case was missing, and the live trial showed what that costs: two members
  * exchanged roughly 180 messages of the form "收到，无补充。" / "确认，#461 与我的自述一致。"
  * over about two minutes, each one individually harmless, and the guard never saw a
  * courtesy chain because the old patterns required the acknowledgement to be the WHOLE
- * message. the design notes names exactly this pair — "反复『收到/谢谢』" — as the case that
+ * message. This pair — "反复『收到/谢谢』" — is exactly the case that
  * must stop, so the rule has to survive a polite tail.
  *
  * The tail is bounded twice over, because a guard that swallows a message carrying work
@@ -106,10 +106,10 @@ export function fingerprint(body) {
  * a new question, a new request, a new result or new evidence.
  *
  * Only rounds that bring nothing are charged against the automatic-round budget.
- * The design forbids a fixed maximum number of discussion rounds (§17.1) and
- * only treats a chain as an anomaly when it adds no new question, no new
- * evidence and no progress (§17.2), so a discussion that keeps producing new
- * substance must not be cut off — an unproductive chain still stops (AT19).
+ * A fixed maximum number of discussion rounds is forbidden; a chain is only an
+ * anomaly when it adds no new question, no new evidence and no progress, so a
+ * discussion that keeps producing new substance must not be cut off — an
+ * unproductive chain still stops.
  *
  * @param {{ fingerprints: string[] }} chain
  * @param {string} body
@@ -143,7 +143,7 @@ export class LoopGuard {
     /**
      * The per-chain counter cannot catch a courtesy ping-pong by itself: each reply
      * quotes the message it answers, so every message carries its target's id as
-     * `causalRootId` and every chain holds ONE round. Measured on the 2026-10-17 AT39
+     * `causalRootId` and every chain holds ONE round. Measured on the 2026-10-17
      * trial: 274 messages, **241 distinct roots**, two members trading "无动作。"
      * while `maxAutomaticRounds` never advanced.
      *
@@ -194,7 +194,7 @@ export class LoopGuard {
     const chainKey = `${input.roomId}|${input.causalRootId}`;
 
     // A human message always goes through and starts a fresh chain allowance:
-    // the user asking again is never "a loop" (the design notes).
+    // the user asking again is never "a loop".
     if (input.authorKind === 'human') {
       this.chains.set(chainKey, { rounds: 0, wakes: [], fingerprints: [], lastAuthor: input.authorId });
       this.paused.delete(chainKey);
@@ -290,7 +290,7 @@ export class LoopGuard {
     const chain = this.chains.get(chainKey) ?? { rounds: 0, wakes: [], fingerprints: [], lastAuthor: null };
     // A round that carries new substance is not spending ANY budget — neither the
     // chain's nor the room's. That is what keeps a 15-round exchange that asks a new
-    // question every time from being cut: the design notes forbids a fixed round cap, and
+    // question every time from being cut: a fixed round cap is forbidden, and
     // an earlier version of this counter charged every wake and did exactly that.
     const substantive = addsNewSubstance(chain, input.body);
     if (!substantive) chain.rounds += 1;
@@ -310,7 +310,7 @@ export class LoopGuard {
   /**
    * Whether something that counts as progress happened in a chain. Progress
    * resets the allowance, because a chain that produced a decision, a task
-   * change or an artifact is not a loop (the design notes).
+   * change or an artifact is not a loop.
    * @param {string} roomId
    * @param {string} causalRootId
    */
@@ -332,7 +332,7 @@ export class LoopGuard {
   /**
    * Detect the mutual-wait case: every listed task is blocked on a member that is
    * itself waiting. Reported to the coordinator and the user rather than
-   * retried forever (the design notes).
+   * retried forever.
    * @param {object[]} tasks
    * @returns {{ detected: boolean, members: string[], tasks: string[] }}
    */
@@ -357,8 +357,7 @@ export class LoopGuard {
 
 /**
  * Detect a dependency cycle before a plan is committed. A cyclic plan must be
- * refused with an explanation, not accepted and then deadlocked (the design notes,
- * AT40).
+ * refused with an explanation, not accepted and then deadlocked.
  *
  * @param {Array<{ id: string, dependencies?: string[] }>} tasks
  * @returns {{ acyclic: boolean, cycle: string[] | null }}

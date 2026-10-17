@@ -99,11 +99,11 @@ describe('package metadata — loader contract', () => {
   });
 
   it('declares an engines range that includes the runtime actually measured', () => {
-    // Measured from the running host: the packaged desktop runtime resolves to
-    // 0.2.0-rc.2. The range must not exclude it.
+    // Measured from the running host. The range must not exclude the packaged
+    // desktop runtime, and must still admit the oldest supported install.
     assert.equal(typeof manifest.engines?.dsh, 'string');
     const range = manifest.engines.dsh;
-    assert.ok(/<0\.3\.0/.test(range), `the upper bound must admit 0.2.0-rc.2, got ${range}`);
-    assert.ok(/(>=0\.1\.7|>=0\.2\.0)/.test(range), `the lower bound must admit the CLI install 0.1.7-rc.1, got ${range}`);
+    assert.ok(/<0\.3\.0/.test(range), `the upper bound must admit the measured runtime, got ${range}`);
+    assert.ok(/(>=0\.1\.7|>=0\.2\.0)/.test(range), `the lower bound must admit the oldest supported install, got ${range}`);
   });
 });

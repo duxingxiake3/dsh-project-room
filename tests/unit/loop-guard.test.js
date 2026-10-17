@@ -1,7 +1,7 @@
 /**
  * Loop guard — the room-level automatic-wake budget.
  *
- * The per-chain counter alone is not enough, and the live AT39 trial proved it: each
+ * The per-chain counter alone is not enough, and the live trial proved it: each
  * reply quotes the message it answers, so every message carries its target's id as
  * `causalRootId`. Two members traded "无动作。" for minutes across **241 distinct
  * roots**, one round each, and `maxAutomaticRounds` never advanced.

@@ -2,17 +2,16 @@
  * Project Room — task service.
  *
  * Owns the task lifecycle, per-task revisions, attempts, and acceptance. The
- * design's hard rules that this file enforces rather than documents:
+ * hard rules this file enforces rather than documents:
  *
- *   - One task has at most ONE effective owner and ONE active attempt (§13.2).
+ *   - One task has at most ONE effective owner and ONE active attempt.
  *   - A status change must be legal in the transition table.
  *   - `submitted` requires real evidence references; a member's sentence "tests
- *     passed" is not evidence (§15.3).
+ *     passed" is not evidence.
  *   - Acceptance requires the artifact's task and decision revisions to match
- *     the current ones, otherwise the result is stale and cannot be accepted
- *     (§13.4).
+ *     the current ones, otherwise the result is stale and cannot be accepted.
  *   - A late result from an old attempt can be stored but never overwrites the
- *     new task state (§9.5).
+ *     new task state.
  *
  * @module dsh-project-room/src/host/tasks/task-service
  */
@@ -49,7 +48,7 @@ export class TaskService {
    * @returns {object}
    */
   propose(input) {
-    const room = this.rooms.requireRoom(input.roomId);
+    const room = this.rooms.assertActive(input.roomId, '创建任务');
     const actor = this.rooms.requireMember(input.actorId);
     if (input.dependencies?.length) {
       const missing = input.dependencies.filter((dependencyId) => !this.store.getTask(dependencyId));
@@ -98,13 +97,13 @@ export class TaskService {
    *
    * Transferring stops the old allocation first and preserves its attempts; the
    * new assignment gets a new revision so an old result can never be presented
-   * as this assignment's deliverable (the design notes, AT42).
+   * as this assignment's deliverable.
    * @param {object} input
    * @returns {object}
    */
   assign(input) {
     const task = this.requireTask(input.taskId);
-    const room = this.rooms.requireRoom(task.roomId);
+    const room = this.rooms.assertActive(task.roomId, '分配任务');
     const owner = this.rooms.requireMember(input.memberId);
     if (owner.roomId !== room.id) throw new RoomError('NOT_A_ROOM_MEMBER', '负责人不属于本项目群。');
     if (owner.kind !== 'agent') throw new RoomError('INVALID_REQUEST', '只有代理成员可以承担任务执行。');
@@ -163,6 +162,7 @@ export class TaskService {
    */
   startAttempt(input) {
     const task = this.requireTask(input.taskId);
+    this.rooms.assertActive(task.roomId, '开始执行任务');
     const active = this.store.listAttempts(task.id, { activeOnly: true });
     const existing = active.find((attempt) => attempt.actorId === input.actorId);
     if (existing) return existing;
@@ -194,6 +194,7 @@ export class TaskService {
    */
   update(input) {
     const task = this.requireTask(input.taskId);
+    this.rooms.assertActive(task.roomId, '更新任务');
     const actor = this.rooms.requireMember(input.actorId);
     const isOwner = task.ownerId === actor.id;
     const isCoordinator = actor.role === 'coordinator';
@@ -309,6 +310,7 @@ export class TaskService {
    */
   async verify(input) {
     const task = this.requireTask(input.taskId);
+    this.rooms.assertActive(task.roomId, '验收任务');
     const actor = this.rooms.requireMember(input.actorId);
     if (task.ownerId === actor.id && actor.role !== 'coordinator') {
       throw new RoomError('FORBIDDEN', '任务的负责人不能自己验收自己的成果；请由测试或主代理验收。');
@@ -324,7 +326,7 @@ export class TaskService {
     const currentDecision = currentDecisionRevision(this.store, task.roomId);
     if (task.decisionRevision < currentDecision) {
       // A stale version cannot be accepted; the result must be re-verified on
-      // the current requirement (the design notes).
+      // the current requirement.
       this.store.updateTask(task.id, { needsSync: true, status: 'rework' });
       throw new RoomError(
         'REVISION_CONFLICT',
@@ -338,7 +340,7 @@ export class TaskService {
     if (input.passed && verifiedReferences === 0) {
       // A pass must rest on at least one artifact that was really checked; a
       // member's sentence "tests passed" is stored as an unverified artifact and
-      // therefore cannot reach acceptance (the design notes, AT25).
+      // therefore cannot reach acceptance.
       throw new RoomError('ARTIFACT_NOT_VERIFIED', '没有可核验的产物引用，不能判定通过。');
     }
 
@@ -385,7 +387,7 @@ export class TaskService {
 
   /**
    * Tasks with everything the task board shows, including why a task is not yet
-   * runnable (§13.6 step 7).
+   * runnable.
    * @param {string} roomId
    * @returns {object[]}
    */

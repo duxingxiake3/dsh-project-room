@@ -3,7 +3,7 @@
  *
  * Every authored message in the system enters here: the user's three `@` input
  * forms, an agent's `room_send` call, and an agent's automatic final reply. The
- * nine steps below are the design notes in code, and the ordering is the point:
+ * nine steps below are the protocol in code, and the ordering is the point:
  *
  *   1. establish the author from the authenticated caller (never from the body)
  *   2. validate room membership, room state and recipients
@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto';
 import { RoomError, TASK_STATUS_LABELS, isoTimestamp } from '../../../shared/contracts.js';
 import { isCourtesy } from './loop-guard.js';
 
-/** Message purposes, used to keep a question from becoming a code change (the design notes). */
+/** Message purposes, used to keep a question from becoming a code change. */
 export const MESSAGE_PURPOSE = Object.freeze({
   chat: 'chat',
   question: 'question',
@@ -61,7 +61,7 @@ export class MessageService {
    *
    * @param {object} input
    * @param {string} input.roomId
-   * @param {string} input.authorId          Server-derived author; never trusted from the body.
+   * @param {string} input.authorId Server-derived author; never trusted from the body.
    * @param {string} [input.clientMessageId] Idempotency key; generated when absent.
    * @param {string} input.body
    * @param {import('../../../shared/contracts.js').Mention[]} [input.mentions]
@@ -82,6 +82,12 @@ export class MessageService {
     if (author.roomId !== room.id) {
       throw new RoomError('NOT_A_ROOM_MEMBER', '作者与项目群不匹配，已拒绝写入。');
     }
+    if (room.status === 'trashed') {
+      throw new RoomError('ROOM_TRASHED', '项目在回收站中，聊天只读；恢复后才能发送新消息。');
+    }
+    if (room.status === 'quiescing' || room.status === 'purging') {
+      throw new RoomError(room.status === 'purging' ? 'ROOM_PURGING' : 'ROOM_QUIESCING', '项目正在停止执行或永久删除，新的会话输入已被阻断。');
+    }
     if (room.status === 'archived' && author.kind === 'agent') {
       throw new RoomError('ROOM_PAUSED', '项目已归档，代理不再接受新的自动执行。');
     }
@@ -98,7 +104,7 @@ export class MessageService {
         taskId: input.taskId ?? null,
       });
       // Same key, different payload: a conflict the caller must resolve rather
-      // than a silent overwrite (the design notes).
+      // than a silent overwrite.
       if (!this.#samePayload(existing, expected)) {
         throw new RoomError('REVISION_CONFLICT', '同一个发送请求标识被用于不同内容，已拒绝重复写入。', {
           clientMessageId,
@@ -110,7 +116,7 @@ export class MessageService {
 
     // 3. Mentions: structured chips plus the deterministic text parse. Both the
     //    preview and this call use the same resolver, so what the user saw is
-    //    what gets delivered (§5.3 rule 11).
+    //    what gets delivered ( rule 11).
     const merged = this.rooms.resolveMentions({
       roomId: room.id,
       body,
@@ -206,11 +212,11 @@ export class MessageService {
     });
 
     if (input.schedule !== false && this.delivery) {
-      // The project's preferred delivery mode is `steer` (the design notes): a member
+      // The project's preferred delivery mode is `steer`: a member
       // that is mid-turn should receive the message at its nearest step boundary.
       // The coordinator still decides from the member's REAL state and the host's
       // real capabilities, and records which mode actually happened — a preference
-      // must never be reported as a fact (AT13).
+      // must never be reported as a fact.
       const preferred = room.config?.delivery?.preferredMode === 'steer' ? 'steer' : 'queue';
       const scheduled = await this.delivery.schedule({
         message: this.store.getMessage(messageId),
@@ -234,8 +240,8 @@ export class MessageService {
   /**
    * Publish a member's final answer back into the room.
    *
-   * This is what makes "the agent answered but the room never saw it" impossible
-   * (the design notes). It is deliberately the same path as an authored message, so
+   * This is what makes "the agent answered but the room never saw it" impossible.
+   * It is deliberately the same path as an authored message, so
    * a final reply's own `@` mentions reach their targets too.
    *
    * @param {object} input
@@ -256,7 +262,7 @@ export class MessageService {
 
     // Exactly one consumed message becomes this reply's `replyTo`; a multi-input
     // turn publishes as a public message so it cannot broadcast to every author
-    // by accident (the design notes).
+    // by accident.
     const consumed = (input.inputMessageIds ?? []).filter(Boolean);
     const replyTo = input.replyTo ?? (consumed.length === 1 ? consumed[0] : null);
 
@@ -281,7 +287,7 @@ export class MessageService {
    * concrete recipient) unless the reply already names someone. An unmentioned
    * user message defaults to the coordinator. An unmentioned agent message is a
    * public statement that wakes nobody — which is what stops "two agents say
-   * thanks forever" from becoming an infinite loop (the design notes, §17.2).
+   * thanks forever" from becoming an infinite loop.
    *
    * @param {object} input
    * @returns {Array<{ memberId: string, deliverable: boolean, reason: string | null, mode: 'queue' | 'steer' }>}
@@ -319,13 +325,13 @@ export class MessageService {
       if (target.kind === 'human') {
         // A human recipient is a notification, never a model invocation. The
         // row starts as `pending` so the coordinator records the notification
-        // state (the design notes) instead of claiming the host discarded it.
+        // state instead of claiming the host discarded it.
         add(target.id, '人类成员：仅通知，不产生模型调用。', false, 'pending');
         continue;
       }
       if (target.status === 'paused') {
         // `paused` is a state of its own: the message is kept, not cancelled,
-        // and an explicit resume is what wakes the member again (the design notes).
+        // and an explicit resume is what wakes the member again.
         add(target.id, '该成员已暂停，消息保留为待处理。', false, 'paused');
         continue;
       }
@@ -334,7 +340,7 @@ export class MessageService {
         continue;
       }
       // A courtesy note ("谢谢") reaches the human it names but does not burn an
-      // agent turn on a message that asks nothing (the design notes).
+      // agent turn on a message that asks nothing.
       const pureCourtesy = isCourtesy(body) && (purpose === MESSAGE_PURPOSE.chat || purpose === null);
       add(target.id, pureCourtesy ? '社交消息：仅通知，不唤醒模型。' : null, !pureCourtesy);
     }
@@ -373,7 +379,7 @@ export class MessageService {
     // `payload_hash` was written from the request itself (body, structured
     // mentions, replyTo, threadId, taskId), so a retry of the same request
     // compares equal — while `mentions` in the row holds the RESOLVED targets
-    // and could not be compared with a raw request (the design notes, AT09).
+    // and could not be compared with a raw request.
     return stored.payloadHash === expectedHash;
   }
 }
@@ -395,9 +401,9 @@ export function hashOf(input) {
 
 /**
  * Classify an authored message. This is a deliberately small, explicit
- * classifier: the design forbids turning a question into a code change, and the
+ * classifier: the rules forbid turning a question into a code change, and the
  * only safe way to do that without a model is to require explicit structure for
- * the change case (the design notes).
+ * the change case.
  * @param {string} body
  * @param {object[]} targets
  * @returns {string}

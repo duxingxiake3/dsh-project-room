@@ -2,16 +2,15 @@
 node_modules/
 *.tsbuildinfo
 
-# Local runtime data: room databases, backups, probe reports
+# Local runtime data: room databases, backups
 .project-room-data/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
-_probe/probe-report.json
 
 # Sandbox ACL diagnostics. Written by a repair tool when a confined write is
-# denied: it names this machine's absolute paths, its DACL and the user's SID.
+# denied: it names absolute local paths, its DACL and the user's SID.
 # One such run was committed by accident and had to be removed from history —
 # this line is what keeps the next one out.
 .dsh-acl-reports/
@@ -24,10 +23,3 @@ Thumbs.db
 
 # Packed release artifact (`npm run pack`): reproducible from the tree, never committed.
 *.tgz
-
-# Captured verification output. Kept OUT of the package on purpose: anything inside
-# a path the manifest's `files` list promises changes what the package contains and
-# makes the tarball stale the moment the record is written — which is exactly what
-# happened, and what the "missing nothing the manifest promises" check caught.
-# Local, timestamped evidence belongs beside `.tmp/`, not inside the package.
-.evidence/

@@ -3,20 +3,19 @@
  *
  * The room database is the authority for "this group message was saved"; the
  * host session log is the authority for "this input entered a turn". They are
- * deliberately different ledgers (the design notes), and this module owns only the
+ * deliberately different ledgers, and this module owns only the
  * first one.
  *
  * Design choices worth stating out loud:
  *
- *   - **SQLite through `node:sqlite`.** Verified present in the desktop host
- *     (Node 24.18.1 / SQLite 3.53.1) with no native build step, so group
- *     messages, deliveries, tasks and decisions share one transaction boundary
- *     as §9.2 requires.
+ *   - **SQLite through `node:sqlite`.** Verified present in the desktop host with no
+ *     native build step, so group messages, deliveries, tasks and decisions share
+ *     one transaction boundary.
  *   - **A single writer.** A lock file beside the database refuses a second
- *     process rather than letting two writers interleave (the design notes).
+ *     process rather than letting two writers interleave.
  *   - **Migration with a backup.** `schemaVersion` is stored in `meta`;
  *     upgrading copies the file aside first, and a failed migration stops
- *     writes instead of leaving half-converted data (the design notes).
+ *     writes instead of leaving half-converted data.
  *   - **`seq` is the only ordering authority.** Timestamps are for display;
  *     `last_seq` is bumped inside the same transaction that inserts the message
  *     and its event, so a message and its `message.created` event can never
@@ -35,14 +34,35 @@ import { RoomError, canTransition, isoTimestamp } from '../../../shared/contract
 import { backupDir, databasePath, ensureDir, lockPath } from './paths.js';
 
 /** Bump when the schema changes; migrations below must handle every older value. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 8;
 
 /**
- * The only room states the product defines (the design notes): active, paused, archived.
- * Every execution gate reads this column, so an unknown value is refused at the
- * write rather than silently disabling all of them.
+ * Room states. `trashed` is the lifecycle state: it is a hard execution
+ * fence and a recoverable soft delete. `quiescing`/`purging` are the transient
+ * fences a lifecycle transition installs BEFORE it asks running agents to stop;
+ * they already block every new admission, so "still stopping" can never admit
+ * new work. Every execution gate reads this column, so an unknown value is
+ * refused at the write rather than silently disabling all of them.
  */
-export const ROOM_STATUSES = new Set(['active', 'paused', 'archived']);
+export const ROOM_STATUSES = new Set(['active', 'paused', 'archived', 'trashed', 'quiescing', 'purging']);
+
+/**
+ * Fine-grained lifecycle states (project lifecycle). Persisted separately from the
+ * admission status so a blocked stop is visible as BLOCKED and never as the
+ * target state it failed to reach.
+ */
+export const ROOM_LIFECYCLE_STATES = new Set([
+  'ACTIVE',
+  'PAUSING',
+  'PAUSED',
+  'QUIESCING',
+  'ARCHIVED',
+  'BLOCKED',
+  'TRASHED',
+  'PURGING',
+  'PURGE_BLOCKED',
+  'PURGED',
+]);
 
 const SCHEMA = `
 create table if not exists meta (
@@ -60,6 +80,13 @@ create table if not exists room (
   plan_revision       integer not null default 0,
   membership_revision integer not null default 0,
   last_seq            integer not null default 0,
+  lifecycle_revision  integer not null default 0,
+  lifecycle_state     text not null default 'ACTIVE',
+  lifecycle_epoch     integer not null default 0,
+  lifecycle_pending   text,
+  deleted_at          text,
+  trash_expires_at    text,
+  last_lifecycle_op_id text,
   config              text not null default '{}',
   created_at          text not null,
   updated_at          text not null
@@ -325,6 +352,289 @@ create table if not exists admin_note (
   body       text not null,
   created_at text not null
 );
+
+/* ------------------------------------------------------------------ *
+ * project lifecycle
+ * ------------------------------------------------------------------ */
+
+create table if not exists project_lifecycle_operation (
+  id                 text primary key,
+  room_id            text not null,
+  action             text not null,
+  state              text not null,
+  expected_revision  integer,
+  requested_by       text,
+  idempotency_key    text not null,
+  result             text,
+  detail             text,
+  created_at         text not null,
+  finished_at        text
+);
+create unique index if not exists lifecycle_operation_key on project_lifecycle_operation(idempotency_key);
+create index if not exists lifecycle_operation_room on project_lifecycle_operation(room_id, created_at);
+
+create table if not exists project_trash_snapshot (
+  room_id         text primary key,
+  snapshot_ref    text not null,
+  snapshot_digest text not null,
+  counts          text not null default '{}',
+  revision        integer not null default 0,
+  created_at      text not null,
+  expires_at      text
+);
+
+create table if not exists project_lifecycle_tombstone (
+  operation_id text primary key,
+  project_id   text not null,
+  action       text not null,
+  result       text not null,
+  counts       text not null default '{}',
+  operated_at  text not null
+);
+
+/* resource ownership–14.4 resource ownership. A resource is a durable fact about a
+ * host object (session, workspace, cache); the resource_share table is what makes the
+ * same canonical path usable by two projects without either one owning the
+ * other's data. Deletion only ever releases this project's share. */
+create table if not exists resource_ownership (
+  id                text primary key,
+  room_id           text not null,
+  kind              text not null,
+  provenance        text not null,
+  host_ref          text,
+  canonical_path    text,
+  ownership         text not null,
+  ref_count         integer not null default 1,
+  safe_delete_status text not null default 'unknown',
+  last_known_state  text,
+  evidence_ref      text,
+  created_at        text not null,
+  updated_at        text not null
+);
+create unique index if not exists resource_identity
+  on resource_ownership(kind, ifnull(host_ref, ''), ifnull(canonical_path, ''));
+create index if not exists resource_room on resource_ownership(room_id);
+
+create table if not exists resource_share (
+  resource_id text not null,
+  room_id     text not null,
+  role        text not null default 'reference',
+  created_at  text not null,
+  primary key (resource_id, room_id)
+);
+create index if not exists resource_share_room on resource_share(room_id);
+
+/* Minimal, non-sensitive deletion audit. It survives the purge it describes. */
+create table if not exists project_deletion_audit (
+  operation_id          text primary key,
+  project_id            text not null,
+  human_actor_ref       text,
+  approved_scope_digest text,
+  affected_refs_digest  text,
+  result                text not null,
+  failed_refs           text not null default '[]',
+  operated_at           text not null
+);
+create index if not exists project_deletion_audit_project on project_deletion_audit(project_id, operated_at);
+
+/* ------------------------------------------------------------------ *
+ * deep research deep research. Proposals and approvals are deliberately
+ * separate from the lifecycle tables: an approved research scope must
+ * never be reusable after a project is archived or trashed.
+ * ------------------------------------------------------------------ */
+
+create table if not exists research_proposal (
+  id                  text primary key,
+  room_id             text not null references room(id) on delete cascade,
+  research_id         text not null,
+  source_message_id   text,
+  requested_by        text not null,
+  topic               text not null,
+  objective           text not null,
+  justification       text not null,
+  hypotheses          text not null default '[]',
+  expected_artifacts  text not null default '[]',
+  participant_plan    text not null default '[]',
+  project_snapshot_ref text not null,
+  scope               text not null default '{}',
+  budget              text not null default '{}',
+  status              text not null,
+  proposal_revision   integer not null default 1,
+  scope_digest        text not null,
+  idempotency_key     text not null,
+  created_at          text not null,
+  updated_at          text not null
+);
+create unique index if not exists research_proposal_key on research_proposal(idempotency_key);
+create index if not exists research_proposal_room on research_proposal(room_id, created_at);
+
+create table if not exists research_approval (
+  id                text primary key,
+  room_id           text not null,
+  research_id       text not null,
+  proposal_id       text not null,
+  proposal_revision integer not null,
+  scope_digest      text not null,
+  decision          text not null,
+  approved_by       text,
+  decided_at        text not null,
+  expires_at        text,
+  channel_ref       text,
+  audit_ref         text,
+  idempotency_key   text not null,
+  scope             text not null default '{}',
+  budget            text not null default '{}',
+  revoked_at        text,
+  revoke_reason     text
+);
+create unique index if not exists research_approval_key on research_approval(idempotency_key);
+create index if not exists research_approval_run on research_approval(research_id, decided_at);
+
+create table if not exists research_run (
+  id                text primary key,
+  room_id           text not null references room(id) on delete cascade,
+  proposal_id       text not null,
+  approval_id       text,
+  status            text not null,
+  current_phase     text not null default 'proposal',
+  base_plan_revision integer not null default 0,
+  participant_ids   text not null default '[]',
+  task_ids          text not null default '[]',
+  paused_reason     text,
+  started_at        text,
+  ended_at          text,
+  conclusion        text,
+  outcome           text,
+  idempotency_key   text not null,
+  created_at        text not null,
+  updated_at        text not null
+);
+create unique index if not exists research_run_key on research_run(idempotency_key);
+create index if not exists research_run_room on research_run(room_id, created_at);
+
+create table if not exists research_budget (
+  research_id       text primary key,
+  max_calls         integer not null,
+  reserved_calls    integer not null default 0,
+  used_calls        integer not null default 0,
+  max_tokens        integer not null,
+  reserved_tokens   integer not null default 0,
+  used_tokens       integer not null default 0,
+  max_wall_clock_ms integer not null,
+  max_experiments   integer not null,
+  reserved_experiments integer not null default 0,
+  experiments_used  integer not null default 0,
+  max_parallel_agents integer not null,
+  started_at        text,
+  updated_at        text not null
+);
+
+create table if not exists research_budget_entry (
+  id            text primary key,
+  research_id   text not null,
+  kind          text not null,
+  units         integer not null default 1,
+  tokens        integer not null default 0,
+  state         text not null,
+  idempotency_key text not null,
+  detail        text,
+  created_at    text not null,
+  updated_at    text not null
+);
+create unique index if not exists research_budget_entry_key on research_budget_entry(research_id, idempotency_key);
+create index if not exists research_budget_entry_run on research_budget_entry(research_id, created_at);
+
+create table if not exists research_hypothesis (
+  id            text primary key,
+  research_id   text not null,
+  author_member_id text not null,
+  claim         text not null,
+  predicted_effect text not null default '',
+  falsification_test text not null default '',
+  status        text not null default 'proposed',
+  evidence_refs text not null default '[]',
+  created_at    text not null
+);
+
+create table if not exists research_experiment (
+  id            text primary key,
+  research_id   text not null,
+  hypothesis_id text,
+  owner_id      text not null,
+  attempt_id    text,
+  baseline_commit text,
+  candidate_commit text,
+  environment_ref text,
+  command_refs  text not null default '[]',
+  metrics       text not null default '{}',
+  artifact_refs text not null default '[]',
+  state         text not null,
+  created_at    text not null,
+  updated_at    text not null
+);
+
+create table if not exists research_finding (
+  id            text primary key,
+  research_id   text not null,
+  issue         text not null,
+  evidence_level text not null,
+  supporting_refs text not null default '[]',
+  counter_refs  text not null default '[]',
+  recommendation text not null default '',
+  uncertainty   text not null default '',
+  created_at    text not null
+);
+
+create table if not exists research_outcome (
+  research_id   text primary key,
+  decision      text not null,
+  chosen_candidate_ref text,
+  baseline_evidence_refs text not null default '[]',
+  regression_evidence_refs text not null default '[]',
+  remaining_risks text not null default '[]',
+  integrated_task_revision integer,
+  accepted_by   text,
+  closed_at     text not null
+);
+
+create table if not exists research_experience (
+  id            text primary key,
+  source_research_id text not null,
+  reusable_lesson text not null,
+  applicability text not null default '',
+  pitfalls      text not null default '',
+  evidence_refs text not null default '[]',
+  review_status text not null default 'draft',
+  created_at    text not null
+);
+
+create table if not exists research_task_link (
+  research_id   text not null,
+  task_id       text not null,
+  kind          text not null,
+  hypothesis_id text,
+  created_at    text not null,
+  primary key (research_id, task_id)
+);
+create index if not exists research_task_link_task on research_task_link(task_id);
+
+create table if not exists research_flowback (
+  research_id text primary key,
+  decision_id text,
+  task_id     text,
+  created_at  text not null
+);
+
+create table if not exists research_session (
+  session_id  text primary key,
+  research_id text not null,
+  room_id     text not null,
+  member_id   text not null,
+  status      text not null,
+  created_at  text not null,
+  disposed_at text
+);
+create index if not exists research_session_run on research_session(research_id, created_at);
 `;
 
 /**
@@ -347,7 +657,7 @@ function parseJson(value, fallback) {
 
 /**
  * Stable content hash for send idempotency: the same `clientMessageId` with a
- * different payload is a conflict, not a retry (the design notes).
+ * different payload is a conflict, not a retry.
  * @param {object} input
  * @returns {string}
  */
@@ -386,8 +696,8 @@ export class RoomStore {
     this.migrations = [
       {
         // v1 → v2: the reminder table gained the outcome of a reminder, so a
-        // fired one and an expired one are distinguishable after the fact
-        // (the design notes). Columns are added only when absent: a database created
+        // fired one and an expired one are distinguishable after the fact.
+        // Columns are added only when absent: a database created
         // by this build already has them from SCHEMA above, and a database that
         // stopped halfway through an earlier migration must still be repairable.
         from: 1,
@@ -402,6 +712,93 @@ export class RoomStore {
               .some((entry) => entry.name === column);
             if (!present) db.exec(`alter table reminder add column ${column} ${type}`);
           }
+        },
+      },
+      {
+        // v2 → v3: project lifecycle (project lifecycle). The room row gains a revision
+        // used for optimistic concurrency and the trash metadata; the operation
+        // log, trash snapshot and audit tombstone arrive through SCHEMA above.
+        // Columns are added only when absent so a half-applied earlier run is
+        // still repairable.
+        from: 2,
+        run: (db) => {
+          for (const [column, type] of [
+            ['lifecycle_revision', 'integer not null default 0'],
+            ['deleted_at', 'text'],
+            ['trash_expires_at', 'text'],
+            ['last_lifecycle_op_id', 'text'],
+          ]) {
+            const present = db
+              .prepare('select name from pragma_table_info(?)')
+              .all('room')
+              .some((entry) => entry.name === column);
+            if (!present) db.exec(`alter table room add column ${column} ${type}`);
+          }
+        },
+      },
+      {
+        // v3 → v4: deep research (deep research). Every table is declared in SCHEMA,
+        // so the migration itself is deliberately empty; a fresh database and
+        // an upgraded one must have the same tables and constraints.
+        from: 3,
+        run: () => {},
+      },
+      {
+        // v4 → v5: the first research budget table added `reserved_experiments`
+        // after a live activation had already created v4. Add it only when absent;
+        // a fresh database already has it from SCHEMA above.
+        from: 4,
+        run: (db) => {
+          const present = db
+            .prepare('select name from pragma_table_info(?)')
+            .all('research_budget')
+            .some((entry) => entry.name === 'reserved_experiments');
+          if (!present) db.exec('alter table research_budget add column reserved_experiments integer not null default 0');
+        },
+      },
+      {
+        // v5 → v6: research flow-back ledger (Decision/Task links). Created by
+        // SCHEMA, so this migration only advances the version.
+        from: 5,
+        run: () => {},
+      },
+      {
+        // v6 → v7: dedicated research session ownership ledger; created by SCHEMA.
+        from: 6,
+        run: () => {},
+      },
+      {
+        // v7 → v8: the observable lifecycle state, fencing epoch, pending stop,
+        // the resource ownership ledger and the deletion audit. Existing rooms
+        // get a state derived from their real status; nothing is merged by name
+        // and no approval is revived.
+        from: 7,
+        run: (db) => {
+          for (const [column, type] of [
+            ['lifecycle_state', "text not null default 'ACTIVE'"],
+            ['lifecycle_epoch', 'integer not null default 0'],
+            ['lifecycle_pending', 'text'],
+          ]) {
+            const present = db
+              .prepare('select name from pragma_table_info(?)')
+              .all('room')
+              .some((entry) => entry.name === column);
+            if (!present) db.exec(`alter table room add column ${column} ${type}`);
+          }
+          // A legacy project has no stored lifecycle state: derive it from the
+          // status the execution gates already use. Unknown ownership resources
+          // are registered lazily as `unknown` and stay protected.
+          db.exec(`
+            update room set lifecycle_state = case status
+              when 'paused' then 'PAUSED'
+              when 'archived' then 'ARCHIVED'
+              when 'trashed' then 'TRASHED'
+              when 'quiescing' then 'QUIESCING'
+              when 'purging' then 'PURGING'
+              else 'ACTIVE'
+            end
+            where lifecycle_state is null or lifecycle_state = 'ACTIVE';
+          `);
         },
       },
     ];
@@ -492,7 +889,7 @@ export class RoomStore {
       if (Number.isFinite(pid) && pid === process.pid) {
         // The same process already holds this database. Two RoomStore instances
         // over one file would interleave transactions behind SQLite's back, so
-        // this is refused exactly like a second process (the design notes).
+        // this is refused exactly like a second process.
         throw new RoomError(
           'FORBIDDEN',
           `本进程已经打开了同一个项目群数据库（${this.file}），已拒绝第二个写入者；请复用同一个群服务实例。`,
@@ -537,7 +934,7 @@ export class RoomStore {
     if (current === SCHEMA_VERSION) return;
 
     // Older data: back it up before touching it, and refuse to continue if the
-    // copy cannot be made (the design notes).
+    // copy cannot be made.
     const backup = join(backupDir(), `pre-migration-v${current}-${Date.now()}.sqlite`);
     try {
       copyFileSync(this.file, backup);
@@ -565,22 +962,26 @@ export class RoomStore {
    */
   insertRoom(room) {
     const now = isoTimestamp();
+    const status = room.status ?? 'active';
+    const lifecycleState = room.lifecycleState ?? (status === 'paused' ? 'PAUSED' : status === 'archived' ? 'ARCHIVED' : status === 'trashed' ? 'TRASHED' : 'ACTIVE');
     this.#db()
       .prepare(
         `insert into room (id, title, workspace_ref, owner_ref, status, language, plan_revision,
-                           membership_revision, last_seq, config, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                           membership_revision, last_seq, lifecycle_state, lifecycle_epoch, config, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         room.id,
         room.title,
         room.workspaceRef ?? null,
         room.ownerRef,
-        room.status ?? 'active',
+        status,
         room.language ?? 'zh-CN',
         room.planRevision ?? 0,
         room.membershipRevision ?? 0,
         room.lastSeq ?? 0,
+        lifecycleState,
+        room.lifecycleEpoch ?? 0,
         JSON.stringify(room.config ?? {}),
         room.createdAt ?? now,
         now,
@@ -611,9 +1012,18 @@ export class RoomStore {
     // The status column is the one field every execution gate reads (delivery,
     // recovery, reminders), so it may not be an arbitrary string: before this check
     // `room.update` accepted anything, which would let a typo ("Archived") leave a
-    // room that no gate recognises. the design notes only defines these three.
+    // room that no gate recognises. Only these three are defined.
     if (patch.status !== undefined && !ROOM_STATUSES.has(patch.status)) {
       throw new RoomError('INVALID_REQUEST', `项目状态只能是 ${[...ROOM_STATUSES].join(' / ')}，收到 "${String(patch.status)}"。`);
+    }
+    if (patch.lifecycleRevision !== undefined && (!Number.isInteger(patch.lifecycleRevision) || patch.lifecycleRevision < 0)) {
+      throw new RoomError('INVALID_REQUEST', 'lifecycleRevision 必须是非负整数。');
+    }
+    if (patch.lifecycleState !== undefined && !ROOM_LIFECYCLE_STATES.has(patch.lifecycleState)) {
+      throw new RoomError('INVALID_REQUEST', `项目生命周期状态只能是 ${[...ROOM_LIFECYCLE_STATES].join(' / ')}。`);
+    }
+    if (patch.lifecycleEpoch !== undefined && (!Number.isInteger(patch.lifecycleEpoch) || patch.lifecycleEpoch < 0)) {
+      throw new RoomError('INVALID_REQUEST', 'lifecycleEpoch 必须是非负整数。');
     }
     const columns = {
       title: 'title',
@@ -621,6 +1031,13 @@ export class RoomStore {
       planRevision: 'plan_revision',
       membershipRevision: 'membership_revision',
       lastSeq: 'last_seq',
+      lifecycleRevision: 'lifecycle_revision',
+      lifecycleState: 'lifecycle_state',
+      lifecycleEpoch: 'lifecycle_epoch',
+      lifecyclePending: 'lifecycle_pending',
+      deletedAt: 'deleted_at',
+      trashExpiresAt: 'trash_expires_at',
+      lastLifecycleOpId: 'last_lifecycle_op_id',
       language: 'language',
       workspaceRef: 'workspace_ref',
       config: 'config',
@@ -630,7 +1047,9 @@ export class RoomStore {
     for (const [key, column] of Object.entries(columns)) {
       if (!(key in patch)) continue;
       sets.push(`${column} = ?`);
-      values.push(key === 'config' ? JSON.stringify(patch[key] ?? {}) : patch[key]);
+      if (key === 'config') values.push(JSON.stringify(patch[key] ?? {}));
+      else if (key === 'lifecyclePending') values.push(patch[key] === null || patch[key] === undefined ? null : JSON.stringify(patch[key]));
+      else values.push(patch[key]);
     }
     if (sets.length === 0) return this.getRoom(roomId);
     sets.push('updated_at = ?');
@@ -644,6 +1063,463 @@ export class RoomStore {
   /** Delete a room and everything that hangs off it. */
   deleteRoom(roomId) {
     this.#db().prepare('delete from room where id = ?').run(roomId);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Project lifecycle (project lifecycle)
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Counts the lifecycle preview and trash snapshot use. Deliberately read-only
+   * and scoped by room id, never by a name or a path.
+   * @param {string} roomId
+   * @returns {object}
+   */
+  roomStats(roomId) {
+    const db = this.#db();
+    const scalar = (sql) => Number(db.prepare(sql).get(roomId)?.n ?? 0);
+    return {
+      messages: scalar('select count(*) as n from message where room_id = ?'),
+      deliveries: scalar('select count(*) as n from delivery where message_id in (select id from message where room_id = ?)'),
+      members: scalar('select count(*) as n from member where room_id = ?'),
+      agents: scalar("select count(*) as n from member where room_id = ? and kind = 'agent'"),
+      ownedSessions: scalar("select count(*) as n from member where room_id = ? and session_ownership = 'owned'"),
+      borrowedSessions: scalar("select count(*) as n from member where room_id = ? and session_ownership = 'borrowed'"),
+      tasks: scalar('select count(*) as n from task where room_id = ?'),
+      decisions: scalar('select count(*) as n from decision where room_id = ?'),
+      artifacts: scalar('select count(*) as n from artifact where room_id = ?'),
+      plans: scalar('select count(*) as n from plan where room_id = ?'),
+      discussions: scalar('select count(*) as n from discussion where room_id = ?'),
+      reminders: scalar('select count(*) as n from reminder where room_id = ?'),
+      events: scalar('select count(*) as n from room_event where room_id = ?'),
+      modelInvocations: scalar('select count(*) as n from model_invocation where room_id = ?'),
+      researchProposals: scalar('select count(*) as n from research_proposal where room_id = ?'),
+      researchApprovals: scalar('select count(*) as n from research_approval where room_id = ?'),
+      researchRuns: scalar('select count(*) as n from research_run where room_id = ?'),
+      researchExperiments: scalar('select count(*) as n from research_experiment where research_id in (select id from research_run where room_id = ?)'),
+      researchFindings: scalar('select count(*) as n from research_finding where research_id in (select id from research_run where room_id = ?)'),
+    };
+  }
+
+  /** @param {object} input */
+  insertLifecycleOperation(input) {
+    this.#db()
+      .prepare(
+        `insert into project_lifecycle_operation
+           (id, room_id, action, state, expected_revision, requested_by, idempotency_key, result, detail, created_at, finished_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.roomId,
+        input.action,
+        input.state ?? 'running',
+        input.expectedRevision ?? null,
+        input.requestedBy ?? null,
+        input.idempotencyKey,
+        input.result === undefined ? null : JSON.stringify(input.result),
+        input.detail ?? null,
+        input.createdAt ?? isoTimestamp(),
+        input.finishedAt ?? null,
+      );
+    return this.getLifecycleOperation(input.id);
+  }
+
+  /** @param {string} id */
+  getLifecycleOperation(id) {
+    const row = this.#db().prepare('select * from project_lifecycle_operation where id = ?').get(id);
+    return row ? mapLifecycleOperation(row) : null;
+  }
+
+  /** @param {string} idempotencyKey */
+  findLifecycleOperationByKey(idempotencyKey) {
+    const row = this.#db().prepare('select * from project_lifecycle_operation where idempotency_key = ?').get(idempotencyKey);
+    return row ? mapLifecycleOperation(row) : null;
+  }
+
+  /**
+   * Operations left in `running` by a crashed process. Recovery marks them
+   * failed rather than pretending the transition completed or leaving the
+   * idempotency key permanently blocked.
+   * @param {string} [state]
+   * @returns {object[]}
+   */
+  listLifecycleOperations(state = 'running') {
+    return this.#db()
+      .prepare('select * from project_lifecycle_operation where state = ? order by created_at asc')
+      .all(state)
+      .map(mapLifecycleOperation);
+  }
+
+  /**
+   * @param {string} id
+   * @param {{ state?: string, result?: object, detail?: string | null, finishedAt?: string | null }} patch
+   */
+  updateLifecycleOperation(id, patch) {
+    const sets = [];
+    const values = [];
+    if (patch.state !== undefined) {
+      sets.push('state = ?');
+      values.push(patch.state);
+    }
+    if (patch.result !== undefined) {
+      sets.push('result = ?');
+      values.push(JSON.stringify(patch.result));
+    }
+    if (patch.detail !== undefined) {
+      sets.push('detail = ?');
+      values.push(patch.detail);
+    }
+    if (patch.finishedAt !== undefined) {
+      sets.push('finished_at = ?');
+      values.push(patch.finishedAt);
+    }
+    if (sets.length === 0) return this.getLifecycleOperation(id);
+    values.push(id);
+    this.#db().prepare(`update project_lifecycle_operation set ${sets.join(', ')} where id = ?`).run(...values);
+    return this.getLifecycleOperation(id);
+  }
+
+  /** @param {object} input */
+  saveTrashSnapshot(input) {
+    this.#db()
+      .prepare(
+        `insert or replace into project_trash_snapshot
+           (room_id, snapshot_ref, snapshot_digest, counts, revision, created_at, expires_at)
+         values (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.roomId,
+        input.snapshotRef,
+        input.snapshotDigest,
+        JSON.stringify(input.counts ?? {}),
+        input.revision ?? 0,
+        input.createdAt ?? isoTimestamp(),
+        input.expiresAt ?? null,
+      );
+    return this.getTrashSnapshot(input.roomId);
+  }
+
+  /** @param {string} roomId */
+  getTrashSnapshot(roomId) {
+    const row = this.#db().prepare('select * from project_trash_snapshot where room_id = ?').get(roomId);
+    return row
+      ? {
+          roomId: row.room_id,
+          snapshotRef: row.snapshot_ref,
+          snapshotDigest: row.snapshot_digest,
+          counts: parseJson(row.counts, {}),
+          revision: row.revision,
+          createdAt: row.created_at,
+          expiresAt: row.expires_at ?? null,
+        }
+      : null;
+  }
+
+  /** @param {string} roomId */
+  deleteTrashSnapshot(roomId) {
+    this.#db().prepare('delete from project_trash_snapshot where room_id = ?').run(roomId);
+  }
+
+  /** @param {object} input */
+  insertProjectTombstone(input) {
+    this.#db()
+      .prepare(
+        `insert or replace into project_lifecycle_tombstone
+           (operation_id, project_id, action, result, counts, operated_at)
+         values (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.operationId,
+        input.projectId,
+        input.action,
+        input.result,
+        JSON.stringify(input.counts ?? {}),
+        input.operatedAt ?? isoTimestamp(),
+      );
+    return this.getProjectTombstone(input.projectId);
+  }
+
+  /** @param {string} projectId */
+  getProjectTombstone(projectId) {
+    const row = this.#db()
+      .prepare('select * from project_lifecycle_tombstone where project_id = ? order by operated_at desc limit 1')
+      .get(projectId);
+    return row
+      ? {
+          operationId: row.operation_id,
+          projectId: row.project_id,
+          action: row.action,
+          result: row.result,
+          counts: parseJson(row.counts, {}),
+          operatedAt: row.operated_at,
+        }
+      : null;
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Resource ownership (resource ownership)
+   * ---------------------------------------------------------------- */
+
+  /**
+   * One resource row by its stable identity. `hostRef` and `canonicalPath` are
+   * never matched by prefix: a path is an identity only after canonicalisation.
+   * @param {{ kind: string, hostRef?: string | null, canonicalPath?: string | null }} input
+   * @returns {object | null}
+   */
+  findResource(input) {
+    const row = this.#db()
+      .prepare(
+        `select * from resource_ownership
+          where kind = ? and ifnull(host_ref, '') = ifnull(?, '') and ifnull(canonical_path, '') = ifnull(?, '')`,
+      )
+      .get(input.kind, input.hostRef ?? null, input.canonicalPath ?? null);
+    return row ? mapResource(row) : null;
+  }
+
+  /** @param {string} id */
+  getResource(id) {
+    const row = this.#db().prepare('select * from resource_ownership where id = ?').get(id);
+    return row ? mapResource(row) : null;
+  }
+
+  /**
+   * Insert the resource if its identity is new, otherwise refresh the mutable
+   * facts. The caller then links it to a project with `linkResource`.
+   * @param {object} input
+   */
+  upsertResource(input) {
+    const existing = this.findResource(input);
+    const now = isoTimestamp();
+    if (existing) {
+      return this.updateResource(existing.id, {
+        ownership: input.ownership ?? existing.ownership,
+        safeDeleteStatus: input.safeDeleteStatus ?? existing.safeDeleteStatus,
+        lastKnownState: input.lastKnownState ?? existing.lastKnownState,
+        evidenceRef: input.evidenceRef ?? existing.evidenceRef,
+      });
+    }
+    const id = `res_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    this.#db()
+      .prepare(
+        `insert into resource_ownership
+           (id, room_id, kind, provenance, host_ref, canonical_path, ownership, ref_count,
+            safe_delete_status, last_known_state, evidence_ref, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.roomId,
+        input.kind,
+        input.provenance ?? 'unknown',
+        input.hostRef ?? null,
+        input.canonicalPath ?? null,
+        input.ownership ?? 'unknown',
+        input.safeDeleteStatus ?? 'unknown',
+        input.lastKnownState ?? null,
+        input.evidenceRef ?? null,
+        now,
+        now,
+      );
+    return this.getResource(id);
+  }
+
+  /**
+   * Record that one project references a resource. The ref count is the number
+   * of distinct projects, so a shared workspace is deletable by neither side.
+   * @param {string} resourceId
+   * @param {string} roomId
+   * @param {string} [role]
+   */
+  linkResource(resourceId, roomId, role = 'reference') {
+    const db = this.#db();
+    const inserted = db
+      .prepare('insert or ignore into resource_share (resource_id, room_id, role, created_at) values (?, ?, ?, ?)')
+      .run(resourceId, roomId, role, isoTimestamp());
+    const refCount = Number(db.prepare('select count(*) as n from resource_share where resource_id = ?').get(resourceId)?.n ?? 0);
+    const resource = this.getResource(resourceId);
+    if (!resource) return null;
+    const ownership = resource.kind === 'workspace' && refCount > 1 ? 'shared' : resource.ownership;
+    this.updateResource(resourceId, { refCount, ownership });
+    return { resource: this.getResource(resourceId), linked: inserted.changes > 0, refCount };
+  }
+
+  /**
+   * Release only this project's share. The resource row itself is kept so a
+   * protected shared path is still reported after one project is purged.
+   * @param {string} resourceId
+   * @param {string} roomId
+   */
+  releaseResourceShare(resourceId, roomId) {
+    const db = this.#db();
+    const removed = db.prepare('delete from resource_share where resource_id = ? and room_id = ?').run(resourceId, roomId);
+    const refCount = Number(db.prepare('select count(*) as n from resource_share where resource_id = ?').get(resourceId)?.n ?? 0);
+    const resource = this.getResource(resourceId);
+    if (!resource) return null;
+    const safeDeleteStatus = refCount > 0 ? resource.safeDeleteStatus : resource.ownership === 'owned' ? 'released' : resource.safeDeleteStatus;
+    return this.updateResource(resourceId, {
+      refCount,
+      safeDeleteStatus,
+      lastKnownState: refCount > 0 ? `${resource.lastKnownState ?? 'active'}|shared-by-${refCount}` : `released-from-${roomId}`,
+    });
+  }
+
+  /** @param {string} resourceId */
+  listResourceShares(resourceId) {
+    return this.#db()
+      .prepare('select * from resource_share where resource_id = ? order by created_at asc')
+      .all(resourceId)
+      .map((row) => ({ resourceId: row.resource_id, roomId: row.room_id, role: row.role, createdAt: row.created_at }));
+  }
+
+  /** @param {string} roomId */
+  listRoomResources(roomId) {
+    return this.#db()
+      .prepare(
+        `select r.*, s.role as share_role from resource_share s
+           join resource_ownership r on r.id = s.resource_id
+          where s.room_id = ? order by r.kind asc, r.created_at asc`,
+      )
+      .all(roomId)
+      .map((row) => ({ ...mapResource(row), shareRole: row.share_role }));
+  }
+
+  /** All resources of one kind (workspace sharing is resolved in JS, not by prefix). */
+  listResourcesByKind(kind) {
+    return this.#db().prepare('select * from resource_ownership where kind = ? order by created_at asc').all(kind).map(mapResource);
+  }
+
+  /**
+   * @param {string} id
+   * @param {{ ownership?: string, refCount?: number, safeDeleteStatus?: string, lastKnownState?: string | null, evidenceRef?: string | null }} patch
+   */
+  updateResource(id, patch) {
+    const sets = [];
+    const values = [];
+    const map = {
+      ownership: 'ownership',
+      refCount: 'ref_count',
+      safeDeleteStatus: 'safe_delete_status',
+      lastKnownState: 'last_known_state',
+      evidenceRef: 'evidence_ref',
+    };
+    for (const [key, column] of Object.entries(map)) {
+      if (!(key in patch)) continue;
+      sets.push(`${column} = ?`);
+      values.push(patch[key]);
+    }
+    if (sets.length === 0) return this.getResource(id);
+    sets.push('updated_at = ?');
+    values.push(isoTimestamp(), id);
+    this.#db().prepare(`update resource_ownership set ${sets.join(', ')} where id = ?`).run(...values);
+    return this.getResource(id);
+  }
+
+  /** @param {object} input */
+  insertDeletionAudit(input) {
+    this.#db()
+      .prepare(
+        `insert or replace into project_deletion_audit
+           (operation_id, project_id, human_actor_ref, approved_scope_digest, affected_refs_digest, result, failed_refs, operated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.operationId,
+        input.projectId,
+        input.humanActorRef ?? null,
+        input.approvedScopeDigest ?? null,
+        input.affectedRefsDigest ?? null,
+        input.result,
+        JSON.stringify(input.failedRefs ?? []),
+        input.operatedAt ?? isoTimestamp(),
+      );
+    return this.getDeletionAudit(input.operationId);
+  }
+
+  /** @param {string} operationId */
+  getDeletionAudit(operationId) {
+    const row = this.#db().prepare('select * from project_deletion_audit where operation_id = ?').get(operationId);
+    return row
+      ? {
+          operationId: row.operation_id,
+          projectId: row.project_id,
+          humanActorRef: row.human_actor_ref ?? null,
+          approvedScopeDigest: row.approved_scope_digest ?? null,
+          affectedRefsDigest: row.affected_refs_digest ?? null,
+          result: row.result,
+          failedRefs: parseJson(row.failed_refs, []),
+          operatedAt: row.operated_at,
+        }
+      : null;
+  }
+
+  /** Deletion audits for one project, newest first. Survives the purge. */
+  listDeletionAudits(projectId) {
+    return this.#db()
+      .prepare('select operation_id from project_deletion_audit where project_id = ? order by operated_at desc')
+      .all(projectId)
+      .map((row) => this.getDeletionAudit(row.operation_id));
+  }
+
+  /**
+   * Permanently remove one project's plugin-private rows. The caller has already
+   * verified the project is trashed, stopped and confirmed; this method never
+   * touches a workspace, a worktree, a host session or another project. The audit
+   * tombstone commits in the same transaction as the deletion.
+   * @param {string} roomId
+   * @param {object | null} [tombstone]
+   */
+  purgeRoom(roomId, tombstone = null) {
+    return this.transaction(() => {
+      if (tombstone) this.insertProjectTombstone(tombstone);
+      const db = this.#db();
+      // Child tables with a foreign key would cascade from `room`, but several
+      // ledgers deliberately have no FK (member aliases, sessions, usage and the
+      // event log). Delete them explicitly so "purged" is not a half-truth.
+      db.prepare('delete from delivery where message_id in (select id from message where room_id = ?)').run(roomId);
+      db.prepare('delete from decision_ack where decision_id in (select id from decision where room_id = ?)').run(roomId);
+      // Resource ownership is an audit of shared/protected objects: the project's
+      // shares go, and its own released rows go, but a path still referenced by
+      // another project stays visible instead of disappearing with this room.
+      db.prepare('delete from resource_share where room_id = ?').run(roomId);
+      db.prepare("delete from resource_ownership where room_id = ? and safe_delete_status = 'released'").run(roomId);
+      db.prepare('delete from member_session where member_id in (select id from member where room_id = ?)').run(roomId);
+      db.prepare('delete from member_model_revision where member_id in (select id from member where room_id = ?)').run(roomId);
+      db.prepare('delete from research_budget_entry where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_budget where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_outcome where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_experience where source_research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_finding where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_experiment where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_hypothesis where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_task_link where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_flowback where research_id in (select id from research_run where room_id = ?)').run(roomId);
+      db.prepare('delete from research_session where room_id = ?').run(roomId);
+      db.prepare('delete from research_approval where room_id = ?').run(roomId);
+      db.prepare('delete from research_run where room_id = ?').run(roomId);
+      db.prepare('delete from research_proposal where room_id = ?').run(roomId);
+      for (const table of [
+        'task_attempt',
+        'artifact',
+        'discussion',
+        'task',
+        'decision',
+        'plan',
+        'message',
+        'member',
+        'member_alias',
+        'model_invocation',
+        'room_event',
+        'reminder',
+        'dispatch',
+        'admin_note',
+        'project_trash_snapshot',
+      ]) {
+        db.prepare(`delete from ${table} where room_id = ?`).run(roomId);
+      }
+      db.prepare('delete from room where id = ?').run(roomId);
+      return { roomId, tombstone: tombstone ? this.getProjectTombstone(tombstone.projectId) : null };
+    });
   }
 
   /**
@@ -781,7 +1657,7 @@ export class RoomStore {
 
   /**
    * Register one alias for a member. Refuses a name already active for another
-   * member, and refuses a tombstoned name (the design notes rule 12: "禁止注册规范化
+   * member, and refuses a tombstoned name (one rule: "禁止注册规范化
    * 后冲突的别名").
    * @param {object} input
    * @param {string} input.roomId
@@ -937,7 +1813,7 @@ export class RoomStore {
    *
    * `message.created` is special-cased by its caller: the message row and this
    * event share one `seq` so nothing can observe two different orders for one
-   * creation (the design notes).
+   * creation.
    *
    * @param {object} input
    * @param {string} input.roomId
@@ -966,7 +1842,7 @@ export class RoomStore {
    *
    * The event log is the plugin's own account of what it did — deliveries accepted,
    * decisions adopted, turns that ended without a visible reply. It is read by the
-   * diagnostics surface so silence always carries a reason (the design notes).
+   * diagnostics surface so silence always carries a reason.
    *
    * @param {string} roomId
    * @param {{ limit?: number, eventTypes?: string[] }} [options]
@@ -1202,7 +2078,7 @@ export class RoomStore {
       clientMessageId: row.client_message_id,
       // The request-level payload hash, kept so a retry of the same send request
       // can be recognised as a duplicate even though `mentions` below holds the
-      // RESOLVED targets (the design notes).
+      // RESOLVED targets.
       payloadHash: row.payload_hash,
       createdAt: row.created_at,
       deliveries,
@@ -1282,7 +2158,7 @@ export class RoomStore {
    * Patch a task, enforcing the transition table and the expected revision.
    *
    * A stale `expectedRevision` is a conflict the caller must resolve by
-   * re-reading, never a silent overwrite (the design notes).
+   * re-reading, never a silent overwrite.
    *
    * @param {string} taskId
    * @param {object} patch
@@ -1722,7 +2598,7 @@ export class RoomStore {
   /**
    * Claim a dispatch key exactly once. Returns `true` when this call created the
    * record, `false` when the same work was already dispatched — which is what
-   * makes "restart does not re-assign the same work" true (the design notes).
+   * makes "restart does not re-assign the same work" true.
    * @param {object} input
    * @returns {{ claimed: boolean, record: object }}
    */
@@ -1775,8 +2651,7 @@ export class RoomStore {
     if ('memberId' in patch) {
       // Member creation records its intent before the member exists, so the
       // dispatch row is where the resulting member id has to land: a retry reads
-      // it back and reuses that member instead of building a second one
-      // (the design notes, AT41).
+      // it back and reuses that member instead of building a second one.
       sets.push('member_id = ?');
       values.push(patch.memberId);
     }
@@ -1844,7 +2719,7 @@ export class RoomStore {
    *
    * The reason is stored rather than only time-stamped because "fired" and
    * "expired because the task was finished" are different facts, and an operator
-   * reading the board later needs to tell them apart (the design notes).
+   * reading the board later needs to tell them apart.
    *
    * @param {string} reminderId
    * @param {'fired' | 'expired'} state
@@ -1892,6 +2767,19 @@ export class RoomStore {
       .run(randomUUID(), roomId, kind, body, isoTimestamp());
   }
 
+  /**
+   * Internal repository access for the research bounded context.
+   *
+   * The room store remains the single writer and the single migration authority;
+   * exposing the handle lets `ResearchRepository` own its own SQL without creating
+   * a second database connection (which would defeat the process lock).
+   * @internal
+   * @returns {import('node:sqlite').DatabaseSync}
+   */
+  database() {
+    return this.#db();
+  }
+
   /** @param {string} roomId @param {number} [limit] */
   listAdminNotes(roomId, limit = 50) {
     return this.#db()
@@ -1919,6 +2807,9 @@ export class RoomStore {
 
 function mapRoom(row) {
   return {
+    // `projectId` names the same immutable id as `roomId`; project lifecycle calls the
+    // lifecycle subject a project, while 's storage calls it a room.
+    projectId: row.id,
     id: row.id,
     title: row.title,
     workspaceRef: row.workspace_ref ?? null,
@@ -1928,9 +2819,50 @@ function mapRoom(row) {
     planRevision: row.plan_revision,
     membershipRevision: row.membership_revision,
     lastSeq: row.last_seq,
+    lifecycleRevision: row.lifecycle_revision ?? 0,
+    lifecycleState: row.lifecycle_state ?? 'ACTIVE',
+    lifecycleEpoch: row.lifecycle_epoch ?? 0,
+    lifecyclePending: parseJson(row.lifecycle_pending, null),
+    deletedAt: row.deleted_at ?? null,
+    trashExpiresAt: row.trash_expires_at ?? null,
+    lastLifecycleOpId: row.last_lifecycle_op_id ?? null,
     config: parseJson(row.config, {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapResource(row) {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    kind: row.kind,
+    provenance: row.provenance,
+    hostRef: row.host_ref ?? null,
+    canonicalPath: row.canonical_path ?? null,
+    ownership: row.ownership,
+    refCount: row.ref_count ?? 0,
+    safeDeleteStatus: row.safe_delete_status,
+    lastKnownState: row.last_known_state ?? null,
+    evidenceRef: row.evidence_ref ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapLifecycleOperation(row) {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    action: row.action,
+    state: row.state,
+    expectedRevision: row.expected_revision ?? null,
+    requestedBy: row.requested_by ?? null,
+    idempotencyKey: row.idempotency_key,
+    result: row.result === null || row.result === undefined ? null : parseJson(row.result, null),
+    detail: row.detail ?? null,
+    createdAt: row.created_at,
+    finishedAt: row.finished_at ?? null,
   };
 }
 

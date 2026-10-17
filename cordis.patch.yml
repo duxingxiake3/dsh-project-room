@@ -11,7 +11,7 @@
 #    This belongs here rather than only in the plugin's Config because it is the
 #    deployment's decision about which preset a project room's members run under,
 #    and because the bundled patch layer is applied unambiguously — measured in
-#    the AT39 trial, while a profile-level `config:` block on this row did not
+#    the trial, while a profile-level `config:` block on this row did not
 #    reach `apply()` (the host reports this entry's Config as `unsupported`, and
 #    members still came up without a preset).
 #

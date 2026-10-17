@@ -1,8 +1,8 @@
 /**
  * Project Room — model profile service.
  *
- * Implements the four configuration levels of the design notes and the switch
- * protocol of §3.6. The rules that matter, stated once:
+ * Implements the four configuration levels and the switch protocol. The rules
+ * that matter, stated once:
  *
  *   - Every option comes from the host's real catalogue. A brand name is never
  *     turned into a model id.
@@ -214,7 +214,7 @@ export class ModelProfileService {
    *
    * The database write is the commit point; the live route changes on the next
    * request. A failure to apply leaves the previous effective binding in place
-   * and reports it, rather than pretending the switch happened (the design notes).
+   * and reports it, rather than pretending the switch happened.
    *
    * @param {object} input
    * @param {string} input.memberId
@@ -289,7 +289,7 @@ export class ModelProfileService {
    *
    * With `selectionMode: fixed` this only ever returns the configured default;
    * with `allowed-pool` it chooses inside the allow-list and returns the reason
-   * so the choice can be shown rather than silently made (the design notes).
+   * so the choice can be shown rather than silently made.
    *
    * @param {object} input
    * @param {string} input.roomId
@@ -355,7 +355,7 @@ export class ModelProfileService {
   /**
    * Switch a member's model after a failure, following the project policy.
    * Returns `null` when policy is `none`, which is the default and the honest
-   * answer: a failed model is not silently replaced (the design notes).
+   * answer: a failed model is not silently replaced.
    * @param {object} input
    * @param {string} input.roomId
    * @param {string} input.memberId

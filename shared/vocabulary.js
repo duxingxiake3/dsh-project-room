@@ -31,7 +31,7 @@ export const ACTION_PREFIX = 'room.';
 
 /**
  * Delivery states. "Delivered" is not "read": `claimed` requires a real host
- * observation (the design notes).
+ * observation.
  * @type {Readonly<Record<string, string>>}
  */
 export const DELIVERY_LABELS = Object.freeze({
@@ -47,7 +47,7 @@ export const DELIVERY_LABELS = Object.freeze({
 });
 
 /**
- * Task states (the design notes).
+ * Task states.
  * @type {Readonly<Record<string, string>>}
  */
 export const TASK_STATUS_LABELS = Object.freeze({
@@ -98,7 +98,7 @@ export const MEMBER_STATUS_LABELS = Object.freeze({
 
 /**
  * Role templates. A template supplies duties and a default handle; it never
- * pins a model brand (design D11).
+ * pins a model brand.
  * @type {ReadonlyArray<{ role: string, handle: string, title: string, aliases: string[], duties: string, defaultObjectives: string[] }>}
  */
 export const ROLE_TEMPLATES = Object.freeze([
@@ -182,6 +182,63 @@ export function canTransition(from, to) {
 }
 
 /**
+ * Research run states (deep research). Kept here so the host and the panel cannot label
+ * "approved" as "running".
+ * @type {Readonly<Record<string, string>>}
+ */
+export const RESEARCH_STATUS_LABELS = Object.freeze({
+  AWAITING_APPROVAL: '待用户批准',
+  APPROVED: '已批准，待启动',
+  REJECTED: '未获批准',
+  RUNNING: '研究中',
+  PAUSED: '已暂停',
+  PAUSED_RECONCILE: '重启后待核对',
+  STOPPED: '已停止',
+  CANCELLED: '已取消',
+  COMPLETED: '已完成',
+  FAILED: '已失败',
+  EXPIRED: '批准已过期',
+});
+
+/** Natural Chinese for a research conclusion. */
+export const RESEARCH_CONCLUSION_LABELS = Object.freeze({
+  improved: '有可验证提升',
+  no_change: '保持不变更合适',
+  inconclusive: '证据不足，无法结论',
+  rejected_candidate: '候选被否决',
+});
+
+/**
+ * Project lifecycle states (project lifecycle). The room `status` is the admission gate;
+ * this is the observable state, so "stopping" is never displayed as "stopped".
+ * @type {Readonly<Record<string, string>>}
+ */
+export const PROJECT_LIFECYCLE_LABELS = Object.freeze({
+  ACTIVE: '进行中',
+  PAUSING: '正在暂停',
+  PAUSED: '已暂停',
+  QUIESCING: '正在停止执行',
+  ARCHIVED: '已归档',
+  BLOCKED: '停止未确认',
+  TRASHED: '回收站',
+  PURGING: '正在永久删除',
+  PURGE_BLOCKED: '清理受阻，待处理',
+  PURGED: '已永久删除',
+});
+
+/** Natural Chinese for the persisted research phase. */
+export const RESEARCH_PHASE_LABELS = Object.freeze({
+  proposal: '提议',
+  approved: '待启动',
+  independent: '独立提案',
+  review: '交叉评审',
+  experiment: '实验验证',
+  converge: '收敛',
+  completed: '已完成',
+  stopped: '已停止',
+});
+
+/**
  * Natural Chinese for a wire error code, so the UI never shows a stack.
  * @type {Readonly<Record<string, string>>}
  */
@@ -192,6 +249,24 @@ export const ERROR_LABELS = Object.freeze({
   HOST_CAPABILITY_MISSING: '当前宿主缺少所需能力',
   DELIVERY_UNCERTAIN: '投递状态不确定，正在核对',
   ROOM_PAUSED: '项目已暂停',
+  ROOM_TRASHED: '项目已在回收站，仅可查看或恢复',
+  ROOM_ARCHIVED: '项目已归档，仅可查看或恢复',
+  ROOM_QUIESCING: '项目正在停止执行，禁止新的任务、消息与唤醒',
+  ROOM_PURGING: '项目正在永久删除，禁止任何新工作',
+  PROJECT_BUSY: '项目仍有正在执行的工作，请先停止并核对',
+  PROJECT_SNAPSHOT_MISSING: '回收站快照缺失，无法恢复',
+  PROJECT_SNAPSHOT_MISMATCH: '回收站快照与当前项目结构不一致',
+  PROJECT_STOP_PENDING: '停止尚未确认，项目已进入阻塞状态',
+  PROJECT_PURGE_BLOCKED: '部分独占资源未能释放，清理已阻塞并保留可恢复数据',
+  RESEARCH_DISABLED: '深度研究功能未启用',
+  RESEARCH_NOT_FOUND: '没有找到这次研究',
+  RESEARCH_NOT_AUTHORIZED: '这项研究还没有获得真实用户批准',
+  RESEARCH_INVALID_STATE: '研究当前状态不允许这个操作',
+  RESEARCH_SCOPE_CHANGED: '研究范围或预算已经变化，必须重新审批',
+  RESEARCH_OUT_OF_SCOPE: '研究请求越出已批准的项目范围',
+  RESEARCH_BUDGET_EXCEEDED: '研究预算已经用尽，已暂停',
+  RESEARCH_BUDGET_MISSING: '研究预算账本缺失',
+  RESEARCH_PROJECT_VERSION_CHANGED: '项目版本已经变化，研究需要重新核对范围',
   NOT_A_ROOM_MEMBER: '你不是这个项目群的成员',
   ARTIFACT_NOT_VERIFIED: '成果未经过核验',
   NOT_FOUND: '没有找到对应内容',

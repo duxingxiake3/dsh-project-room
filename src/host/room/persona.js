@@ -4,7 +4,7 @@
  * The persona is behaviour guidance, not a costume: it states duties, the right
  * to disagree with evidence, the duty to admit mistakes, and the prohibition on
  * performing conflict or fabricating progress. It never pins a model brand, and
- * it never forbids a member from talking to another member (the design notes).
+ * it never forbids a member from talking to another member.
  *
  * @module dsh-project-room/src/host/room/persona
  */
@@ -49,7 +49,7 @@ export const TONE_PRESETS = Object.freeze({
  * @param {string} input.role
  * @param {string} input.handle
  * @param {string} input.roomTitle
- * @param {string[]} input.peerNames        Other members, for the contact list.
+ * @param {string[]} input.peerNames Other members, for the contact list.
  * @param {string} input.duties
  * @param {string | null} input.currentTask
  * @param {PersonaConfig} [input.persona]
@@ -90,7 +90,7 @@ export function composePersonaInstructions(input) {
  * Compose the extra instruction block for the coordinator.
  *
  * The coordinator's real duties are planning and verification, so they are
- * stated as process requirements rather than as seniority (the design notes).
+ * stated as process requirements rather than as seniority.
  *
  * @param {object} input
  * @param {string} input.roomTitle

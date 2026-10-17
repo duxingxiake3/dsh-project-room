@@ -3,7 +3,7 @@
  *
  * Room data is plugin-owned state, so it lives under the DSH home; it must not
  * land inside a user's project directory where a `git add -A` would commit the
- * conversation (the design notes).
+ * conversation.
  *
  * @module dsh-project-room/src/host/storage/paths
  */

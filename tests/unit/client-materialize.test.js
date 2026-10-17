@@ -18,7 +18,7 @@
  *   - the factory needs ONLY `react` and `react/jsx-runtime` — the module table is
  *     closed, so any other `require` is a hard failure.
  *
- * What it cannot prove (listed honestly in the compatibility report): that the
+ * What it cannot prove (listed honestly below): that the
  * slots render, that the styles look right, and that the interaction feels
  * correct. Those need a real page.
  */

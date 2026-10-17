@@ -1,7 +1,7 @@
 /**
  * Project Room — recovery service.
  *
- * Runs the the design notes sequence after the plugin loads, in this order, because
+ * Runs the the intended recovery sequence after the plugin loads, in this order, because
  * each step depends on the previous one being true:
  *
  *   1. the store is already open with its single writer and migrations applied;
@@ -111,7 +111,7 @@ export class RecoveryService {
       }
       if (member.sessionOwnership === 'borrowed') {
         // Re-link without claiming ownership: a borrowed user session is never
-        // re-created or disposed (the design notes).
+        // re-created or disposed.
         continue;
       }
       try {

@@ -150,7 +150,7 @@ const baseMember = {
   displayName: '后端·阿北',
   handle: 'backend',
   role: 'backend',
-  cwd: 'C:\\demo',
+  cwd: process.cwd(),
   model: null,
   personaInstructions: '你是后端成员。',
 };

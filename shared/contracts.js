@@ -24,7 +24,7 @@
  * ------------------------------------------------------------------ */
 
 /**
- * How a mention reached the room. The three legal input paths of the design notes.
+ * How a mention reached the room. The three legal input paths.
  * @typedef {'avatar' | 'picker' | 'typed'} MentionOrigin
  */
 
@@ -41,8 +41,8 @@
  */
 
 /**
- * Visible member state. Deliberately split from delivery and task state
- * (design D05): "online", "delivered" and "done" are three different facts.
+ * Visible member state. Deliberately split from delivery and task state:
+ * "online", "delivered" and "done" are three different facts.
  * @typedef {'idle' | 'working' | 'awaiting_reply' | 'needs_user' | 'paused' | 'offline'} MemberStatus
  */
 
@@ -65,17 +65,17 @@
  * @typedef {object} Mention
  * @property {MemberId} targetMemberId
  * @property {MentionOrigin} origin
- * @property {string} displaySnapshot  Name as shown when the mention was made.
+ * @property {string} displaySnapshot Name as shown when the mention was made.
  * @property {{ start: number, end: number } | null} span
  */
 
 /**
  * One `@token` found in free text, before member resolution.
  * @typedef {object} ParsedAtToken
- * @property {number} start  UTF-16 start offset of `@` in the original body.
- * @property {number} end    UTF-16 end offset (exclusive).
- * @property {string} raw    Exact source text, e.g. `@后端` or `＠「前端 小林」`.
- * @property {string} name   Extracted name without `@` or bracket quotes.
+ * @property {number} start UTF-16 start offset of `@` in the original body.
+ * @property {number} end UTF-16 end offset (exclusive).
+ * @property {string} raw Exact source text, e.g. `@后端` or `＠「前端 小林」`.
+ * @property {string} name Extracted name without `@` or bracket quotes.
  */
 
 /**
@@ -84,8 +84,8 @@
  * @property {ParsedAtToken} token
  * @property {'member' | 'everyone' | 'unknown' | 'ambiguous'} kind
  * @property {MemberId | null} memberId
- * @property {MemberId[]} candidates  Populated when `kind` is `ambiguous`.
- * @property {string} reason  Human-readable Chinese explanation for the UI.
+ * @property {MemberId[]} candidates Populated when `kind` is `ambiguous`.
+ * @property {string} reason Human-readable Chinese explanation for the UI.
  */
 
 /* ------------------------------------------------------------------ *
@@ -95,10 +95,10 @@
 /**
  * A host model configuration reference. Credentials never live here.
  * @typedef {object} ModelProfileRef
- * @property {string} id            Project Room's own id for this reference.
+ * @property {string} id Project Room's own id for this reference.
  * @property {string} hostProfileRef Host-side settings identity, when one exists.
- * @property {string} providerRoute  Registered provider route, e.g. `deepseek-official`.
- * @property {string} modelId        Exact provider model id — never a brand nickname.
+ * @property {string} providerRoute Registered provider route, e.g. `deepseek-official`.
+ * @property {string} modelId Exact provider model id — never a brand nickname.
  */
 
 /**
@@ -130,8 +130,8 @@
  * @property {MemberKind} kind
  * @property {TeamRole} role
  * @property {string} displayName
- * @property {string} handle          Unique ASCII mention handle, e.g. `backend`.
- * @property {string[]} aliases       Additional unique aliases, e.g. `后端`, `阿北`.
+ * @property {string} handle Unique ASCII mention handle, e.g. `backend`.
+ * @property {string[]} aliases Additional unique aliases, e.g. `后端`, `阿北`.
  * @property {MemberStatus} status
  * @property {number} membershipRevision
  * @property {number} personaRevision
@@ -153,7 +153,7 @@
 
 /**
  * Delivery states. "Delivered" is not "read": `claimed` requires a real host
- * observation (the design notes).
+ * observation.
  * @typedef {'pending' | 'paused' | 'admitting' | 'accepted' | 'claimed' | 'replied' | 'discarded' | 'failed' | 'uncertain'} DeliveryStatus
  */
 
@@ -191,7 +191,7 @@
 
 /**
  * One append-only room event. `seq` is the single ordering authority for both
- * messages and system events (the design notes).
+ * messages and system events.
  * @typedef {object} RoomEvent
  * @property {RoomId} roomId
  * @property {number} seq
@@ -205,7 +205,7 @@
  * ------------------------------------------------------------------ */
 
 /**
- * Task lifecycle (the design notes). Transitions are validated, not free-form.
+ * Task lifecycle. Transitions are validated, not free-form.
  * @typedef {'proposed' | 'ready' | 'in_progress' | 'blocked' | 'submitted' | 'verifying' | 'accepted' | 'rework' | 'superseded' | 'failed' | 'cancelled'} TaskStatus
  */
 
@@ -277,25 +277,25 @@
 /**
  * Probed once at activation and reported to the user verbatim. A `false` field
  * must degrade the product visibly; it must never silently become a different
- * feature (the design notes).
+ * feature.
  *
  * @typedef {object} HostCapabilities
- * @property {boolean} ownedSessions           Can create plugin-owned root sessions.
- * @property {boolean} borrowedMainBinding     Can bind a user's live session without owning it.
- * @property {boolean} steer                   Can deliver at a step boundary of a running turn.
- * @property {boolean} stableInputIdentity     Caller-side message identity survives into the log.
- * @property {boolean} lookupAcceptedInput     Can confirm a specific input landed.
- * @property {boolean} observeClaimedInput     Can observe that a turn consumed a specific input.
- * @property {boolean} observeReply            Can observe assistant output of a turn.
- * @property {boolean} persistence             Session persistence present.
- * @property {boolean} perMemberModelRouting   Per-session provider/model routing.
- * @property {boolean} modelCatalog            Can enumerate real models per provider.
- * @property {boolean} safeModelRebinding      Can change a live session's route safely.
- * @property {boolean} sqlite                  Local durable storage available.
+ * @property {boolean} ownedSessions Can create plugin-owned root sessions.
+ * @property {boolean} borrowedMainBinding Can bind a user's live session without owning it.
+ * @property {boolean} steer Can deliver at a step boundary of a running turn.
+ * @property {boolean} stableInputIdentity Caller-side message identity survives into the log.
+ * @property {boolean} lookupAcceptedInput Can confirm a specific input landed.
+ * @property {boolean} observeClaimedInput Can observe that a turn consumed a specific input.
+ * @property {boolean} observeReply Can observe assistant output of a turn.
+ * @property {boolean} persistence Session persistence present.
+ * @property {boolean} perMemberModelRouting Per-session provider/model routing.
+ * @property {boolean} modelCatalog Can enumerate real models per provider.
+ * @property {boolean} safeModelRebinding Can change a live session's route safely.
+ * @property {boolean} sqlite Local durable storage available.
  * @property {string} dshVersion
  * @property {string} nodeVersion
  * @property {string} electronVersion
- * @property {string[]} notes                  Precise gaps, shown to the user.
+ * @property {string[]} notes Precise gaps, shown to the user.
  */
 
 /* ------------------------------------------------------------------ *
@@ -303,14 +303,14 @@
  * ------------------------------------------------------------------ */
 
 /**
- * Structured error codes returned by every write operation (the design notes).
- * @typedef {'MENTION_AMBIGUOUS' | 'MEMBER_UNAVAILABLE' | 'REVISION_CONFLICT' | 'HOST_CAPABILITY_MISSING' | 'DELIVERY_UNCERTAIN' | 'ROOM_PAUSED' | 'NOT_A_ROOM_MEMBER' | 'ARTIFACT_NOT_VERIFIED' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'FORBIDDEN' | 'INTERNAL'} RoomErrorCode
+ * Structured error codes returned by every write operation.
+ * @typedef {'MENTION_AMBIGUOUS' | 'MEMBER_UNAVAILABLE' | 'REVISION_CONFLICT' | 'HOST_CAPABILITY_MISSING' | 'DELIVERY_UNCERTAIN' | 'ROOM_PAUSED' | 'ROOM_TRASHED' | 'ROOM_ARCHIVED' | 'PROJECT_BUSY' | 'PROJECT_SNAPSHOT_MISSING' | 'PROJECT_SNAPSHOT_MISMATCH' | 'RESEARCH_DISABLED' | 'RESEARCH_NOT_FOUND' | 'RESEARCH_NOT_AUTHORIZED' | 'RESEARCH_INVALID_STATE' | 'RESEARCH_SCOPE_CHANGED' | 'RESEARCH_OUT_OF_SCOPE' | 'RESEARCH_BUDGET_EXCEEDED' | 'RESEARCH_BUDGET_MISSING' | 'RESEARCH_PROJECT_VERSION_CHANGED' | 'NOT_A_ROOM_MEMBER' | 'ARTIFACT_NOT_VERIFIED' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'FORBIDDEN' | 'INTERNAL'} RoomErrorCode
  */
 
 /**
  * @typedef {object} RoomErrorShape
  * @property {RoomErrorCode} code
- * @property {string} message       Natural Chinese for the user.
+ * @property {string} message Natural Chinese for the user.
  * @property {object} [details]
  */
 

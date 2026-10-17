@@ -6,7 +6,7 @@
  * What is git-specific, and therefore here:
  *
  *   - git is *optional*. A machine without it is a supported configuration that
- *     degrades to serialized writes (the design notes), so `gitVersion()` returns
+ *     degrades to serialized writes, so `gitVersion()` returns
  *     `null` instead of throwing while `git()` throws a typed `RoomError`, because
  *     a git command that fails is a fact the caller must report rather than swallow.
  *   - git is always run with an explicit `cwd`. A command silently aimed at the

@@ -1,7 +1,7 @@
 /**
- * Project Room — reminder expiry (the design notes).
+ * Project Room — reminder expiry.
  *
- * The design asks for reminders that are *bound* to a task and a deadline, stored
+ * Reminders are *bound* to a task and a deadline, stored
  * durably, deduplicated, and — this is the part that is easy to skip — **invalidated
  * when the reason for them has gone away**. A reminder that fires after the task
  * was finished, cancelled, or handed to a member who has since exited is not a
@@ -22,7 +22,7 @@
  *      second copy on retry — it produces a duplicate *send*, which the message
  *      service collapses.
  *   3. A reminder never mentions anyone, so it can never wake an agent and start a
- *      new causal chain. "提醒消息本身不自动触发提醒的提醒" (§11.4) falls out of
+ *      new causal chain. "提醒消息本身不自动触发提醒的提醒" falls out of
  *      that rather than needing a special case.
  *   4. A failure to send leaves the reminder settled, not pending. Re-firing on
  *      every tick forever is worse than one lost nudge, and the failure is
@@ -149,6 +149,9 @@ export class ReminderService {
     const room = this.store.getRoom(reminder.roomId);
     if (!room) return { outcome: 'expired', reason: 'room-missing' };
     if (room.status === 'archived') return { outcome: 'expired', reason: 'room-archived' };
+    if (room.status === 'trashed') return { outcome: 'expired', reason: 'room-trashed' };
+    if (room.status === 'quiescing') return { outcome: 'expired', reason: 'room-quiescing' };
+    if (room.status === 'purging') return { outcome: 'expired', reason: 'room-purging' };
 
     const target = this.store.getMember(reminder.targetId);
     // A retired member is `offline`; their reminder is addressed to nobody.
@@ -260,7 +263,7 @@ function authorFor(store, roomId, target) {
  *
  * It carries the task, the state it is stuck in and what is missing, because a
  * reminder that only says "any progress?" cannot be acted on without re-reading
- * the whole room (the design notes: source every summary). Nothing time-dependent is
+ * the whole room. Nothing time-dependent is
  * included, so the text is stable for a given task revision — which is what makes
  * the deterministic `clientMessageId` a true idempotency key rather than a label.
  *
@@ -275,7 +278,7 @@ function composeReminder(task, target, blocker) {
   return [
     `【提醒】@${target.handle} 这项任务已到跟进时间，目前仍是「${label}」（r${task.revision}）。`,
     // The id is included because a reminder that names only the objective cannot be
-    // traced back to a task row without re-reading the whole room (§12.1).
+    // traced back to a task row without re-reading the whole room.
     `任务：${task.objective}（${task.id}）`,
     blocker ? `记录缺少：${blocker}` : null,
     '如果已经不需要跟进，请把任务状态更新掉；这里的提醒会随任务结束一起失效。',

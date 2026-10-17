@@ -1,7 +1,7 @@
 /**
  * Project Room — deterministic @ mention resolver.
  *
- * This module implements the design notes. It is the single source of truth for all
+ * This module implements the protocol. It is the single source of truth for all
  * three legal input paths (avatar menu, picker, plain text), and it is loaded by
  * BOTH halves: the host imports it as ESM, the browser loads the same file
  * through the client module table. Preview and server therefore cannot drift —
@@ -181,7 +181,7 @@ export function maskBody(body) {
   while ((tagMatch = tag.exec(text)) !== null) mask(tagMatch.index, tagMatch.index + tagMatch[0].length);
 
   // 5. Link targets `](...)`, bare URLs, `mailto:` addresses, and the whole of
-  //    any email address (`local@domain`) — per the design notes rule 2.
+  //    any email address (`local@domain`).
   const email = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
   let emailMatch;
   while ((emailMatch = email.exec(text)) !== null) {
@@ -274,7 +274,7 @@ export function extractAtTokens(body) {
 
 /**
  * Read `「...」`-style bracketed names, which are the only way to mention a
- * member whose alias contains a space (the design notes rule 7).
+ * member whose alias contains a space.
  * @param {string} text
  * @param {number} start
  * @returns {{ name: string, end: number } | null}
@@ -306,7 +306,7 @@ function readBracketedName(text, start) {
 export class MentionResolver {
   /**
    * @param {object} input
-   * @param {RoomMember[]} input.members   Active members (human and agent).
+   * @param {RoomMember[]} input.members Active members (human and agent).
    * @param {number} [input.membershipRevision]
    * @param {string[]} [input.tombstones]  Retired aliases that must not be reused.
    * @param {string[]} [input.everyoneKeywords]
@@ -389,7 +389,7 @@ export class MentionResolver {
     const hits = exactHits.length > 0 ? exactHits : this.folded.get(folded) ?? [];
     const unique = dedupeMembers(hits);
 
-    // §5.3 rule 12: a retired alias stays a tombstone. Resolving it to a
+    // rule 12: a retired alias stays a tombstone. Resolving it to a
     // *different* member would silently mis-deliver text the user wrote for
     // someone who left, so a tombstoned name is inert by construction —
     // reusing it is refused when an alias is registered, not un-tombstoned here.

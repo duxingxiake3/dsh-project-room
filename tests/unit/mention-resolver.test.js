@@ -1,6 +1,6 @@
 /**
- * Mention resolver unit tests — the design notes special-input table and the
- * AT02–AT09 / AT17 / AT34 acceptance cases that are decidable without a host.
+ * Mention resolver unit tests — the special-input table and the acceptance
+ * cases that are decidable without a host.
  *
  * Every case here is a rule the product promises; if one of these changes the
  * user-visible behaviour changed, so the test is the specification.
@@ -76,14 +76,14 @@ function targetsOf(body, members = MEMBERS, structured = []) {
 }
 
 describe('mention resolver — the three legal input paths', () => {
-  it('AT04: @后端, @backend and ＠后端 all reach the same member', () => {
+  it('@后端, @backend and ＠后端 all reach the same member', () => {
     for (const body of ['@后端 接口好了吗', '@backend 接口好了吗', '＠后端 接口好了吗', '@BACKEND 接口好了吗']) {
       const result = targetsOf(body);
       assert.deepEqual(result.ids, ['member_backend'], `body: ${body}`);
     }
   });
 
-  it('AT03/AT04: an avatar chip and a matching typed mention deliver once', () => {
+  it('an avatar chip and a matching typed mention deliver once', () => {
     const result = targetsOf('@backend 麻烦看下', MEMBERS, [
       { targetMemberId: 'member_backend', origin: 'avatar', displaySnapshot: '后端·阿北', span: null },
     ]);
@@ -91,7 +91,7 @@ describe('mention resolver — the three legal input paths', () => {
     assert.equal(result.ids.length, 1, 'same member twice must not double-deliver');
   });
 
-  it('AT02: a picker chip resolves without any text at all', () => {
+  it('a picker chip resolves without any text at all', () => {
     const result = targetsOf('', MEMBERS, [
       { targetMemberId: 'member_frontend', origin: 'picker', displaySnapshot: '前端·阿青', span: null },
     ]);
@@ -99,7 +99,7 @@ describe('mention resolver — the three legal input paths', () => {
     assert.deepEqual(result.origins, ['picker']);
   });
 
-  it('AT05: the same member named by handle and alias yields one target', () => {
+  it('the same member named by handle and alias yields one target', () => {
     const result = targetsOf('@backend @后端 @阿北 三方确认一下');
     assert.deepEqual(result.ids, ['member_backend']);
   });
@@ -111,7 +111,7 @@ describe('mention resolver — the three legal input paths', () => {
 });
 
 describe('mention resolver — boundaries and structure', () => {
-  it('AT08: emails, code, quotes and links do not wake anyone', () => {
+  it('emails, code, quotes and links do not wake anyone', () => {
     const cases = [
       '请发到 dev@example.com 这个邮箱',
       'npm 包是 @scope/pkg 的那一个',
@@ -142,7 +142,7 @@ describe('mention resolver — boundaries and structure', () => {
     assert.match(result.hints[0], /@前端/);
   });
 
-  it('AT05: a bracketed name with a space resolves exactly', () => {
+  it('a bracketed name with a space resolves exactly', () => {
     const members = [
       ...MEMBERS,
       { id: 'member_design', kind: 'agent', role: 'designer', displayName: '设计·小林', handle: 'design', aliases: ['前端 小林'], status: 'idle' },
@@ -152,7 +152,7 @@ describe('mention resolver — boundaries and structure', () => {
     assert.deepEqual(targetsOf('@前端 小林 麻烦看下', members).ids, ['member_frontend']);
   });
 
-  it('AT05: duplicate display names are ambiguous, not guessed', () => {
+  it('duplicate display names are ambiguous, not guessed', () => {
     const members = [
       ...MEMBERS,
       { id: 'member_wang_a', kind: 'agent', role: 'frontend', displayName: '小王', handle: 'wang-a', aliases: [], status: 'idle' },
@@ -164,7 +164,7 @@ describe('mention resolver — boundaries and structure', () => {
     assert.deepEqual(result.ambiguous[0].candidates.sort(), ['member_wang_a', 'member_wang_b']);
   });
 
-  it('AT05/§5.3 rule 12: a retired alias is a tombstone, not a new member', () => {
+  it('/ rule 12: a retired alias is a tombstone, not a new member', () => {
     const instance = new MentionResolver({
       members: [
         ...MEMBERS,
@@ -178,7 +178,7 @@ describe('mention resolver — boundaries and structure', () => {
     assert.equal(merged.unknownText.length, 1);
   });
 
-  it('§5.3 rule 12: bound mentions keep their memberId after a rename', () => {
+  it('bound mentions keep their memberId after a rename', () => {
     const before = resolver();
     const after = new MentionResolver({
       members: MEMBERS.map((member) =>
@@ -199,7 +199,7 @@ describe('mention resolver — boundaries and structure', () => {
 });
 
 describe('mention resolver — expansion and hygiene', () => {
-  it('AT17: @所有人 expands to the active agent snapshot', () => {
+  it('@所有人 expands to the active agent snapshot', () => {
     const members = MEMBERS.map((member) =>
       member.id === 'member_tester' ? { ...member, status: 'offline' } : member,
     );

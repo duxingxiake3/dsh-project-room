@@ -3,8 +3,8 @@
  * host. Every service call below is the production implementation; the fake host
  * only replaces the Harness runtime (sessions, inbox, model catalogue).
  *
- * Acceptance cases covered here: AT01, AT04, AT06, AT09, AT10, AT14, AT17,
- * AT19, AT20, AT21, AT22, AT25, AT27, AT39, AT40, AT41, AT42.
+ * The behaviours below are grouped by flow; each test name states a product
+ * promise rather than a mock detail.
  */
 
 import assert from 'node:assert/strict';
@@ -66,7 +66,7 @@ function eventsOfType(stack, roomId, eventType) {
 
 const ids = (...members) => members.map((member) => member.id).sort();
 
-describe('project room — team, identity and re-open (AT01)', () => {
+describe('project room — team, identity and re-open', () => {
   it('binds four real host sessions, keeps stable member ids, and re-opens from disk', async (t) => {
     const stack = createRoomStack();
     t.after(() => stack.close());
@@ -119,10 +119,10 @@ describe('project room — team, identity and re-open (AT01)', () => {
 });
 
 describe('project room — mentions, send idempotency and the communication matrix', () => {
-  it('AT04/AT09 — one typed @mention is one delivery, and a replay is one message', async (t) => {
+  it('one typed @mention is one delivery, and a replay is one message', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
 
-    // AT04: the three legal spellings all resolve to the same member.
+    // : the three legal spellings all resolve to the same member.
     const variants = [
       { key: 'v-ascii', body: '@backend 接口字段改到哪里了？' },
       { key: 'v-alias', body: '@后端 接口字段改到哪里了？' },
@@ -173,7 +173,7 @@ describe('project room — mentions, send idempotency and the communication matr
     );
   });
 
-  it('AT06 — every direction delivers straight to the member, with no coordinator relay', async (t) => {
+  it('every direction delivers straight to the member, with no coordinator relay', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
     /** @type {Record<string, number>} how many envelopes each member SHOULD have */
     const expected = { coordinator: 0, frontend: 0, backend: 0, tester: 0 };
@@ -245,7 +245,7 @@ describe('project room — mentions, send idempotency and the communication matr
   });
 });
 
-describe('project room — chat versus requirement change (AT10)', () => {
+describe('project room — chat versus requirement change', () => {
   it('classifies a question as a question, and a change as a task change', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
 
@@ -300,7 +300,7 @@ describe('project room — chat versus requirement change (AT10)', () => {
   });
 });
 
-describe('project room — delivery mode follows the real member state (AT12/AT13)', () => {
+describe('project room — delivery mode follows the real member state', () => {
   it('reaches a running member at a step boundary and an idle one on its next turn', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
     const sessionId = agents.backend.sessionId;
@@ -338,7 +338,7 @@ describe('project room — delivery mode follows the real member state (AT12/AT1
   });
 });
 
-describe('project room — partial delivery failure (AT14)', () => {
+describe('project room — partial delivery failure', () => {
   it('reports per-recipient status and never re-delivers the successful one', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
 
@@ -383,7 +383,7 @@ describe('project room — partial delivery failure (AT14)', () => {
   });
 });
 
-describe('project room — everyone, the user and self (AT17)', () => {
+describe('project room — everyone, the user and self', () => {
   it('expands @所有人, notifies @用户 without a model call, and never self-wakes on @自己', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
     const teamIds = ids(agents.coordinator, agents.frontend, agents.backend, agents.tester);
@@ -437,7 +437,7 @@ describe('project room — everyone, the user and self (AT17)', () => {
   });
 });
 
-describe('project room — loop guard (AT19)', () => {
+describe('project room — loop guard', () => {
   it('does not truncate a 15-round exchange that asks something new every round', async (t) => {
     const { stack, room, agents } = await freshRoom(t);
     const root = 'chain-at19';
@@ -473,10 +473,10 @@ describe('project room — loop guard (AT19)', () => {
 
     // A confirmation with a short polite tail is still a confirmation.
     //
-    // The live AT39 trial produced ~180 messages of exactly these shapes ("收到，无补充。" /
+    // The live trial produced ~180 messages of exactly these shapes ("收到，无补充。" /
     // "确认，#461 与我的自述一致。") in about two minutes, and the guard missed every one of
     // them, because the older patterns required the acknowledgement to be the entire
-    // message. §14.4 names "反复『收到/谢谢』" as the case that must stop, so these
+    // message. names "反复『收到/谢谢』" as the case that must stop, so these
     // strings are pinned from the real room.
     for (const text of ['收到，闭环确认，无补充。', '收到，无补充。两边都静止，等执行环境。', '收到，无补充。', '确认，#461 的汇总与我的自述一致。']) {
       assert.equal(isCourtesy(text), true, `应当识别为客套：${text}`);
@@ -529,7 +529,7 @@ describe('project room — loop guard (AT19)', () => {
   });
 });
 
-describe('project room — an unmentioned member can still work (AT20)', () => {
+describe('project room — an unmentioned member can still work', () => {
   it('reads the room and speaks to another member without being mentioned first', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
     const added = await stack.rooms.ensureMember({
@@ -567,7 +567,7 @@ describe('project room — an unmentioned member can still work (AT20)', () => {
   });
 });
 
-describe('project room — requirement change and stale results (AT21/AT22)', () => {
+describe('project room — requirement change and stale results', () => {
   it('records a human change, marks tasks needsSync, and refuses the stale result', async (t) => {
     const workspace = makeWorkspace({ 'src/login.tsx': 'export const login = 1;\n' });
     const { stack, room, agents, human } = await freshRoom(t, { room: { workspaceRef: workspace } });
@@ -610,7 +610,7 @@ describe('project room — requirement change and stale results (AT21/AT22)', ()
       affectedTaskIds: [task.id],
     });
 
-    // AT21: one accepted decision with its source, the affected task and its owners.
+    // : one accepted decision with its source, the affected task and its owners.
     assert.equal(decision.status, 'accepted');
     assert.equal(decision.sourceMessageId, changeMessage.message.id);
     assert.equal(decision.acceptedBy, human.id);
@@ -680,7 +680,7 @@ describe('project room — requirement change and stale results (AT21/AT22)', ()
     });
     assert.equal(resubmitted.status, 'submitted');
 
-    // AT22: a LATER requirement change (decision r2, another task) makes this
+    // : a LATER requirement change (decision r2, another task) makes this
     // result stale — the old attempt's output cannot be accepted under it.
     const otherTask = stack.tasks.propose({
       roomId: room.id,
@@ -756,7 +756,7 @@ describe('project room — requirement change and stale results (AT21/AT22)', ()
   });
 });
 
-describe('project room — acceptance needs real evidence (AT25)', () => {
+describe('project room — acceptance needs real evidence', () => {
   it('refuses submission without references and acceptance without a verified artifact', async (t) => {
     const workspace = makeWorkspace({ 'src/api/auth.ts': 'export const auth = 1;\n' });
     const { stack, room, agents } = await freshRoom(t, { room: { workspaceRef: workspace } });
@@ -842,7 +842,7 @@ describe('project room — acceptance needs real evidence (AT25)', () => {
   });
 });
 
-describe('project room — planning, dependencies and cycles (AT39/AT40)', () => {
+describe('project room — planning, dependencies and cycles', () => {
   it('splits a goal into owned tasks, keeps dependents non-runnable, and refuses a cycle', async (t) => {
     const { stack, room, agents } = await freshRoom(t);
 
@@ -969,7 +969,7 @@ describe('project room — planning, dependencies and cycles (AT39/AT40)', () =>
   });
 });
 
-describe('project room — idempotent commit and dispatch (AT41)', () => {
+describe('project room — idempotent commit and dispatch', () => {
   it('does not duplicate tasks, attempts or dispatch records', async (t) => {
     const { stack, room, agents } = await freshRoom(t);
     const proposal = stack.planning.propose({
@@ -1049,7 +1049,7 @@ describe('project room — idempotent commit and dispatch (AT41)', () => {
   });
 });
 
-describe('project room — per-member models and the allowed pool (AT42)', () => {
+describe('project room — per-member models and the allowed pool', () => {
   it('honours each member route, and keeps auto-selection inside the pool and off locked members', async (t) => {
     const { stack, room, agents } = await freshRoom(t);
 
@@ -1156,7 +1156,7 @@ describe('project room — per-member models and the allowed pool (AT42)', () =>
   });
 });
 
-describe('project room — forged identity and forged authority (AT27)', () => {
+describe('project room — forged identity and forged authority', () => {
   it('refuses a cross-room author and grants nothing for a body claiming to be the boss', async (t) => {
     const { stack, room, agents, human } = await freshRoom(t);
 
@@ -1256,9 +1256,9 @@ describe('project room — composition root', () => {
 
     await apply(host.ctx, { dataDir, httpRoute: true });
 
-    assert.equal(host.tools.length, 15, '每个群工具都要注册到宿主工具表');
+    assert.equal(host.tools.length, 23, '每个群工具都要注册到宿主工具表');
     const names = host.tools.map((tool) => tool.name);
-    for (const expected of ['room_send', 'room_read', 'room_task_update', 'room_decision_propose', 'room_artifact_publish']) {
+    for (const expected of ['room_send', 'room_read', 'room_task_update', 'room_decision_propose', 'room_artifact_publish', 'room_research_propose', 'room_research_experiment', 'room_research_flowback']) {
       assert.ok(names.includes(expected), `缺少工具 ${expected}`);
     }
     assert.equal(host.routes.length, 1);
@@ -1284,17 +1284,30 @@ describe('project room — composition root', () => {
     // Activation with the sweep disabled must still complete cleanly: the service
     // is constructed on that path too, so a wiring mistake would surface here.
     await apply(host.ctx, { dataDir, httpRoute: false, reminders: false });
-    assert.equal(host.tools.length, 15, '工具注册不受提醒开关影响');
+    assert.equal(host.tools.length, 23, '工具注册不受提醒开关影响（15 个原有工具 + 8 个研究工具）');
     assert.deepEqual(host.logs.error, []);
   });
 
-  it('leaves the member agent preset unset by default, and rejects a non-string one', async () => {
+  it('normalizes research config without allowing an unbounded budget', async () => {
     const plugin = await import('../../src/host/index.js');
+    const defaults = plugin.Config['~standard'].validate({}).value;
+    assert.equal(defaults.research.enabled, true);
+    assert.equal(defaults.research.maxModelCalls, 32);
+
+    const merged = plugin.Config['~standard'].validate({ research: { enabled: false } }).value;
+    assert.equal(merged.research.enabled, false);
+    assert.equal(merged.research.maxModelCalls, 32, '关闭研究不能把预算默认值清空');
+
+    assert.ok(Array.isArray(plugin.Config['~standard'].validate({ research: { maxModelCalls: 0 } }).issues));
+    assert.ok(Array.isArray(plugin.Config['~standard'].validate({ research: { maxParallelAgents: -1 } }).issues));
+  });
+
+  it('leaves the member agent preset unset by default, and rejects a non-string one', async () => {    const plugin = await import('../../src/host/index.js');
     const defaults = plugin.Config['~standard'].validate({}).value;
     // Unset is load-bearing: it is the behaviour that has actually been measured
     // ("inherit whatever this host composes"). Guessing a preset name here would
     // silently change every member's tool surface — the very thing this option
-    // exists to make explicit after the AT39 trial found members had no file tools.
+    // exists to make explicit after the trial found members had no file tools.
     assert.equal(defaults.memberAgentPreset, undefined);
     assert.ok(Array.isArray(plugin.Config['~standard'].validate({ memberAgentPreset: 42 }).issues));
     assert.equal(
@@ -1306,7 +1319,7 @@ describe('project room — composition root', () => {
 
 describe('project room — paused and archived projects stop automatic execution', () => {
   it('keeps an archived project readable but never wakes a member', async (t) => {
-    // the design notes: "归档项目 | 停止自动执行，保留消息、任务、决定、成果与模型绑定历史".
+    // the archive contract: "归档项目 | 停止自动执行，保留消息、任务、决定、成果与模型绑定历史".
     // Before this gate only `paused` was checked, so an archived project kept waking
     // its members on every mention.
     const stack = createRoomStack();

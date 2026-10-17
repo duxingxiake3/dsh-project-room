@@ -1,5 +1,5 @@
 /**
- * Model configuration tests — the four-level precedence of the design notes and the
+ * Model configuration tests — the four-level precedence and the
  * fallback that makes a brand-new project usable at all.
  *
  * The gap these cover: with nothing configured, `chooseProfile` used to return

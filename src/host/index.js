@@ -17,8 +17,7 @@
  *
  * Unload reverses it: stop admitting, detach observers, release only the members
  * this plugin owns, close the database. A borrowed user session is never
- * disposed, and a project unrelated to a project room is never touched
- * (the design notes).
+ * disposed, and a project unrelated to a project room is never touched.
  *
  * @module dsh-project-room
  */
@@ -33,7 +32,10 @@ import { createRelayMessage, HostAdapter } from './adapter/host-adapter.js';
 import { DecisionService } from './decisions/decision-service.js';
 import { DeliveryCoordinator } from './delivery/coordinator.js';
 import { TurnObserver } from './delivery/turn-observer.js';
+import { ProjectLifecycleService } from './lifecycle/lifecycle-service.js';
 import { ModelProfileService } from './models/model-service.js';
+import { ResearchRepository } from './research/repository.js';
+import { ResearchService } from './research/research-service.js';
 import { ContextBuilder } from './room/context-builder.js';
 import { LoopGuard } from './room/loop-guard.js';
 import { MessageService } from './room/message-service.js';
@@ -76,8 +78,8 @@ export const inject = ['tools', 'webServer', 'agents', 'llm', 'systemPrompt'];
 /**
  * Plugin configuration.
  *
- * Every key is optional: the defaults below ARE the design's proposed
- * configuration, and a profile patch may override any of them.
+ * Every key is optional: the defaults below ARE the default configuration,
+ * and a profile patch may override any of them.
  *
  * The object is shaped as a Standard Schema, because that is what the loader
  * reads (`runtime.Config['~standard'].validate(config)`). Declaring it this way
@@ -100,7 +102,11 @@ export const Config = {
         return { issues: [{ message: 'projectRoom 配置必须是一个对象。', path: [] }] };
       }
       const issues = [];
-      const merged = { ...DEFAULT_CONFIG, ...value };
+      const merged = {
+        ...DEFAULT_CONFIG,
+        ...value,
+        research: { ...DEFAULT_CONFIG.research, ...(value.research ?? {}) },
+      };
       const stringOrUndefined = (key) => {
         if (merged[key] !== undefined && merged[key] !== null && typeof merged[key] !== 'string') {
           issues.push({ message: `${key} 必须是字符串。`, path: [key] });
@@ -121,6 +127,25 @@ export const Config = {
           message: 'maxAutomaticWakesPerMinute 必须是正数；它是防止空转烧钱的房间级兜底。',
           path: ['maxAutomaticWakesPerMinute'],
         });
+      }
+      if (
+        typeof merged.trashRetentionDays !== 'number' ||
+        !Number.isFinite(merged.trashRetentionDays) ||
+        merged.trashRetentionDays <= 0
+      ) {
+        issues.push({ message: 'trashRetentionDays 必须是正数；回收站保留期不能为 0 或负数。', path: ['trashRetentionDays'] });
+      }
+      if (!merged.research || typeof merged.research !== 'object' || Array.isArray(merged.research)) {
+        issues.push({ message: 'research 必须是对象。', path: ['research'] });
+      } else {
+        if (typeof merged.research.enabled !== 'boolean') {
+          issues.push({ message: 'research.enabled 必须是 true 或 false。', path: ['research', 'enabled'] });
+        }
+        for (const key of ['maxModelCalls', 'maxTotalTokens', 'maxWallClockMs', 'maxExperimentRuns', 'maxParallelAgents']) {
+          if (!Number.isInteger(merged.research[key]) || merged.research[key] <= 0) {
+            issues.push({ message: `research.${key} 必须是正整数；研究不能拥有无上限预算。`, path: ['research', key] });
+          }
+        }
       }
       for (const key of ['httpRoute', 'autoCreateSessions', 'autoResume', 'publishFinalReplies', 'reminders']) {
         if (merged[key] !== undefined && typeof merged[key] !== 'boolean') {
@@ -159,16 +184,30 @@ export const DEFAULT_CONFIG = Object.freeze({
   autoResume: true,
   /** Whether a room-driven turn's final answer is published back to the room. */
   publishFinalReplies: true,
-  /** Whether due reminders are swept and invalidated (the design notes). */
+  /** Whether due reminders are swept and invalidated. */
   reminders: true,
+  /** How long a project stays recoverable in the recycle bin (project lifecycle). */
+  trashRetentionDays: 30,
+  /**
+   * Deep research defaults (deep research). The proposal carries the exact values the
+   * human sees and approves; these are only the initial suggestion.
+   */
+  research: Object.freeze({
+    enabled: true,
+    maxModelCalls: 32,
+    maxTotalTokens: 120000,
+    maxWallClockMs: 3600000,
+    maxExperimentRuns: 10,
+    maxParallelAgents: 3,
+  }),
   /**
    * Which agent preset member sessions are created under.
    *
    * Deliberately `undefined` by default, i.e. "inherit whatever this host composes".
-   * Leaving it unset is the behaviour that has been measured: on this machine members
-   * then receive the room collaboration tools only, with no file or shell tools.
+   * Leaving it unset is the behaviour that has been measured: members then receive
+   * the room collaboration tools only, with no file or shell tools.
    * Setting it is the documented lever for a deployment that wants members to be able
-   * to write and run code (the design notes), but **no preset name is guessed here**: which
+   * to write and run code, but **no preset name is guessed here**: which
    * value grants those tools is a property of the host's preset catalogue, and
    * hard-coding a guess would silently change every member's tool surface.
    */
@@ -193,7 +232,7 @@ export async function apply(ctx, config = {}) {
   const options = { ...DEFAULT_CONFIG, ...config };
   const disposers = [disposeHooks];
 
-  // What configuration actually arrived. Recorded because the AT39 trial established
+  // What configuration actually arrived. Recorded because the trial established
   // that member sessions need an agent preset to receive file and shell tools, and two
   // attempts to supply one — a profile `config:` block on this row, then the plugin's
   // own bundle patch — both left members holding the room tools only. Without this line
@@ -228,6 +267,10 @@ export async function apply(ctx, config = {}) {
   /* ------------------------------------------------------------------ *
    * 2. Host adapter
    * ------------------------------------------------------------------ */
+  // The usage sink is created before the research service because the adapter
+  // observes calls as soon as member sessions exist; the indirection lets the
+  // research ledger settle usage without making the adapter depend on research.
+  const researchRef = { current: null };
   const adapter = new HostAdapter({
     ctx,
     logger,
@@ -238,7 +281,7 @@ export async function apply(ctx, config = {}) {
     // Preset mounting happens during recovery, before any room panel exists to show
     // an error. The activation trace is where that outcome survives a restart.
     trace: (phase, detail) => trace(phase, detail),
-    // Real token usage from the member's own stream (the design notes). Wrapped so a
+    // Real token usage from the member's own stream. Wrapped so a
     // storage failure can never break a model call that already succeeded.
     onUsage: (invocation) => {
       try {
@@ -273,6 +316,16 @@ export async function apply(ctx, config = {}) {
           attributed: invocation.attributed,
           usage: invocation.usage,
         });
+        try {
+          researchRef.current?.recordModelUsage({
+            memberId: invocation.memberId,
+            roomId: invocation.roomId,
+            researchId: invocation.researchId ?? null,
+            usage: invocation.usage,
+          });
+        } catch (error) {
+          traceError('research.usage', error);
+        }
       } catch (error) {
         traceError('usage.record', error);
       }
@@ -323,6 +376,31 @@ export async function apply(ctx, config = {}) {
     createSession: (input) => ensureMemberSession(input),
   });
   const decisions = new DecisionService({ store, rooms, tasks, messages, logger });
+  const pluginRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const researchRepository = new ResearchRepository({ store });
+  const research = new ResearchService({
+    store,
+    repository: researchRepository,
+    rooms,
+    models,
+    adapter,
+    agentPreset: options.memberAgentPreset,
+    messages,
+    tasks,
+    planning,
+    decisions,
+    artifacts,
+    protectedRoots: [pluginRoot, capabilities.coreResolvedFrom, capabilities.coreResolvedFrom ? dirname(capabilities.coreResolvedFrom) : null].filter(Boolean),
+    budgetDefaults: options.research,
+    enabled: options.research?.enabled !== false,
+    logger,
+  });
+  researchRef.current = research;
+  try {
+    research.recoverStaleRuns();
+  } catch (error) {
+    logger.warn?.(`[project-room] research restart reconciliation failed: ${error?.message ?? error}`);
+  }
   const observer = new TurnObserver({
     store,
     adapter,
@@ -363,13 +441,24 @@ export async function apply(ctx, config = {}) {
    *
    * Guarded by an in-flight promise map: a member added by the coordinator and
    * observed by the room subscriber must produce exactly ONE host session, never
-   * two (the design notes "成员创建恢复").
+   * two.
    * @param {object} input
    * @returns {Promise<{ sessionId: string }>}
    */
   async function ensureMemberSession(input) {
     const member = store.getMember(input.memberId);
     if (!member) throw new RoomError('NOT_FOUND', `成员 ${input.memberId} 不存在。`);
+    const room = store.getRoom(member.roomId);
+    if (!room) throw new RoomError('NOT_FOUND', `项目群 ${member.roomId} 不存在。`);
+    if (room.status === 'trashed') {
+      throw new RoomError('ROOM_TRASHED', '项目在回收站中，不能创建或恢复成员会话；请先恢复项目。');
+    }
+    if (room.status === 'quiescing' || room.status === 'purging') {
+      throw new RoomError(room.status === 'purging' ? 'ROOM_PURGING' : 'ROOM_QUIESCING', '项目正在停止执行或永久删除，不能创建或恢复成员会话。');
+    }
+    if (room.status === 'archived') {
+      throw new RoomError('ROOM_ARCHIVED', '项目已归档，不会创建或恢复成员会话；请先恢复为暂停态。');
+    }
     if (member.sessionId && adapter.agentOf(member.id)) {
       return { sessionId: member.sessionId };
     }
@@ -443,6 +532,33 @@ export async function apply(ctx, config = {}) {
     return task;
   }
 
+  // The lifecycle service is constructed after `ensureMemberSession` because a
+  // resume re-creates the member sessions through that exact path. It has no
+  // route-level authority of its own beyond the authenticated HTTP channel.
+  const lifecycle = new ProjectLifecycleService({
+    store,
+    adapter,
+    ensureMemberSession,
+    researchSessionRows: (roomId) => researchRepository.listResearchSessionsForRoom(roomId),
+    logger,
+    retentionMs: options.trashRetentionDays * 24 * 60 * 60 * 1000,
+  });
+  // A lifecycle transition is a research fence as well: pause stops new
+  // admissions; archive/trash revoke the research grant so a restore cannot
+  // reuse it. This is deliberately after both services exist.
+  lifecycle.onTransition = (action, roomId) => {
+    if (action === 'pause') {
+      research.suspendForLifecycle(roomId, 'pause', 'project paused');
+    } else if (action === 'archive' || action === 'trash') {
+      research.suspendForLifecycle(roomId, action, `project ${action}`);
+    }
+  };
+  try {
+    lifecycle.recoverStaleOperations();
+  } catch (error) {
+    logger.warn?.(`[project-room] lifecycle recovery failed: ${error?.message ?? error}`);
+  }
+
   /* ------------------------------------------------------------------ *
    * 4. Host observation
    * ------------------------------------------------------------------ */
@@ -462,7 +578,7 @@ export async function apply(ctx, config = {}) {
   /* ------------------------------------------------------------------ *
    * 5. Tools and route
    * ------------------------------------------------------------------ */
-  const tools = buildRoomTools({ rooms, messages, models, tasks, planning, decisions, artifacts, memberOfSession });
+  const tools = buildRoomTools({ rooms, messages, models, tasks, planning, decisions, artifacts, research, memberOfSession, researchSessionOf: (sessionId) => research.sessionActor(sessionId) });
   trace('tools.built', { count: tools.length, names: tools.map((tool) => tool.name) });
   const toolNames = [];
   if (ctx.tools?.register) {
@@ -510,6 +626,8 @@ export async function apply(ctx, config = {}) {
           guard,
           recovery,
           workspace,
+          lifecycle,
+          research,
           ensureMemberSession,
           memberOfSession,
           capabilities,
@@ -543,7 +661,7 @@ export async function apply(ctx, config = {}) {
    * 7. Reminders
    * ------------------------------------------------------------------ */
   // Started after recovery: recovery may settle tasks, and firing a reminder for
-  // a task that recovery just finished would be exactly the noise §11.4 forbids.
+  // a task that recovery just finished would be exactly the noise forbids.
   if (options.reminders !== false) {
     const stopReminders = reminders.start();
     disposers.push(stopReminders);
@@ -633,8 +751,7 @@ function pluginScopedToolNames(ctx) {
 
 /**
  * Whether `git` is available for worktree isolation. Reported, never assumed:
- * a non-git project falls back to serialized writes with a visible note
- * (the design notes).
+ * a non-git project falls back to serialized writes with a visible note.
  * @returns {string | null} the version string, or null when unavailable
  */
 function probeGit() {
@@ -644,8 +761,8 @@ function probeGit() {
 /**
  * Adopt the current session as a room's human member.
  *
- * The plugin deliberately does not claim ownership of a user session (design
- * §8.2). What it can do truthfully is record the binding so the UI can offer
+ * The plugin deliberately does not claim ownership of a user session. What it
+ * can do truthfully is record the binding so the UI can offer
  * "open my session", and refuse when the host cannot support it.
  *
  * @param {object} input

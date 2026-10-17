@@ -1,7 +1,7 @@
 /**
- * Real token usage per member call (the design notes).
+ * Real token usage per member call.
  *
- * The capability table in §8.5 ends with "用量费用：记录实际用量；可靠价格缺失时显示未知
+ * The capability table ends with "用量费用：记录实际用量；可靠价格缺失时显示未知
  * 或估算". Before this test the `model_invocation` table existed but nothing ever
  * wrote to it, so "how much did this project cost" had no answer at all.
  *
@@ -138,7 +138,7 @@ async function memberWithUsage(route = { providerRoute: 'pi-ai', modelId: 'glm-4
     displayName: '后端·阿北',
     handle: 'backend',
     role: 'backend',
-    cwd: 'E:\\demo',
+    cwd: process.cwd(),
     model: route,
   });
   const agentCtx = adapter.agentOf('member_backend').ctx;
@@ -306,7 +306,7 @@ describe('usage — a real call is recorded against the member that made it', ()
       displayName: '文档',
       handle: 'docs',
       role: 'docs',
-      cwd: 'E:\\demo',
+      cwd: process.cwd(),
       model: { providerRoute: 'pi-ai', modelId: 'glm-4.6' },
     });
     const agentCtx = adapter.agentOf('member_docs').ctx;
