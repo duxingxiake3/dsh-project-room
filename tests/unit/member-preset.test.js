@@ -20,8 +20,9 @@ import { HostAdapter } from '../../src/host/adapter/host-adapter.js';
 /**
  * A Cordis-shaped host whose preset registry records what the adapter asks of it.
  *
- * @param {{ presets?: object | null, resumeHeader?: object, mountAddsTools?: string[] }} [options]
- *   `presets: null` means the host has no registry at all.
+ * @param {{ presets?: object | null, resumeHeader?: object, mountAddsTools?: string[], presetDefault?: string, failResolveTimes?: number }} [options]
+ *   `presets: null` means the host has no registry at all. `failResolveTimes` models
+ *   the activation race: the service exists but the declaration has not registered.
  */
 function fakeHost(options = {}) {
   const created = [];
@@ -29,6 +30,7 @@ function fakeHost(options = {}) {
   const exposed = [];
   const presetCalls = { resolve: [], mount: [], mountedInto: [] };
   const events = [];
+  const traceEvents = [];
 
   const mountAddsTools = options.mountAddsTools ?? [];
 
@@ -38,10 +40,16 @@ function fakeHost(options = {}) {
       : options.presets ?? {
           async resolve(id) {
             presetCalls.resolve.push(id);
+            if (options.failResolveTimes !== undefined && presetCalls.resolve.length <= options.failResolveTimes) {
+              throw new Error(`Unknown agent preset: ${id}`);
+            }
             return { id };
           },
           async mount(agentCtx, id) {
             presetCalls.mount.push(id);
+            if (options.failMountTimes !== undefined && presetCalls.mount.length <= options.failMountTimes) {
+              throw new Error(`Agent preset ${id} is not usable yet`);
+            }
             presetCalls.mountedInto.push(agentCtx);
             // A real mount registers the preset's tool plugins in this context, so
             // the tools only become visible at this point in `setup`.
@@ -128,10 +136,13 @@ function fakeHost(options = {}) {
     ctx,
     logger: ctx.logger,
     ...(options.presetDefault === undefined ? {} : { agentPreset: options.presetDefault }),
+    // Real budget is 3000 ms; the tests need the same behaviour without the wait.
+    presetWaitBudget: options.presetWaitBudget ?? 20,
+    trace: (phase, detail) => traceEvents.push({ phase, detail }),
   });
   adapter.onEvent((event) => events.push(event));
 
-  return { adapter, created, restrictCalls, exposed, presetCalls, events };
+  return { adapter, created, restrictCalls, exposed, presetCalls, events, traceEvents };
 }
 
 const baseMember = {
@@ -150,7 +161,9 @@ describe('member agent presets', () => {
 
     await host.adapter.createMember({ ...baseMember, memberId: 'member_a', agentPreset: 'standard' });
 
-    assert.deepEqual(host.presetCalls.resolve, ['standard'], 'the preset must be resolved by name');
+    // Resolved once for the creation header and once inside the mount helper; both
+    // name the same preset, and only one mount may happen.
+    assert.deepEqual(new Set(host.presetCalls.resolve), new Set(['standard']), 'the preset must be resolved by name');
     assert.deepEqual(host.presetCalls.mount, ['standard'], 'the preset must actually be mounted');
     assert.equal(host.created.length, 1);
     assert.equal(host.created[0].createOptions.meta.agentPreset, 'standard', 'the header must say which preset it started under');
@@ -261,6 +274,54 @@ describe('member agent presets', () => {
     await host.adapter.resumeMember({ ...baseMember, memberId: 'member_a', sessionId: 'session_a' });
 
     assert.deepEqual(host.presetCalls.mount, ['standard'], 'the deployment default must be used');
+  });
+
+  it('waits out a preset whose declaration registers after the plugin did', async () => {
+    // The activation race: recovery runs ~1.3 s in, the registry service already
+    // exists, but the `standard` declaration may land later. One failed resolve must
+    // not silently leave the member without tools — measured on the 13:31 restart,
+    // where every old room resumed and none gained a single tool.
+    const host = fakeHost({
+      resumeHeader: {},
+      presetDefault: 'standard',
+      mountAddsTools: ['pwsh'],
+      failResolveTimes: 1,
+    });
+
+    await host.adapter.resumeMember({ ...baseMember, memberId: 'member_a', sessionId: 'session_a' });
+
+    assert.deepEqual(host.presetCalls.mount, ['standard'], 'the retry must still mount the preset');
+    assert.ok(
+      host.traceEvents.some(
+        (entry) => entry.phase === 'member.preset.mount-retry' || entry.phase === 'member.preset.resolve-retry',
+      ),
+      'the wait must be visible in the activation trace',
+    );
+    assert.ok(
+      host.traceEvents.some((entry) => entry.phase === 'member.preset.mounted'),
+      'a successful mount must be recorded too',
+    );
+  });
+
+  it('retries a preset whose plugin tree is still activating', async () => {
+    // `register` records the definition before its tree finishes activating, and
+    // `mount` re-audits that tree. During boot-time recovery the honest answer is
+    // "not usable yet" — the same transient shape as an unknown id, one layer deeper.
+    const host = fakeHost({
+      resumeHeader: {},
+      presetDefault: 'standard',
+      mountAddsTools: ['pwsh'],
+      failMountTimes: 1,
+    });
+
+    await host.adapter.resumeMember({ ...baseMember, memberId: 'member_a', sessionId: 'session_a' });
+
+    assert.deepEqual(host.presetCalls.mount, ['standard', 'standard'], 'the first attempt must be retried');
+    assert.ok(
+      host.traceEvents.some((entry) => entry.phase === 'member.preset.mount-retry'),
+      'the failed attempt must be visible in the activation trace',
+    );
+    assert.ok(host.exposed.includes('pwsh'), 'the second attempt must really mount the tree');
   });
 
   it('reports, rather than throws, when a resumed preset cannot be mounted', async () => {

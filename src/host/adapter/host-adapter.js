@@ -109,6 +109,18 @@ export class HostAdapter {
      * @type {string | undefined}
      */
     this.defaultAgentPreset = input.agentPreset;
+    /**
+     * Activation trace sink. Preset mounting happens during recovery, inside this
+     * plugin's own activation — before any room panel exists to show an error. The
+     * trace is the only place that outcome survives a restart.
+     * @type {((phase: string, detail: object) => void) | null}
+     */
+    this.tracer = input.trace ?? null;
+    /**
+     * Milliseconds this activation may spend waiting for a declared preset to appear.
+     * Shared, not per member — see `#resolvePreset`.
+     */
+    this.presetWaitBudget = input.presetWaitBudget ?? 3000;
     /** @type {Map<string, { handle: object, modelRef: { current: object | null } }>} */
     this.members = new Map();
     /** @type {Set<(event: object) => void>} */
@@ -798,15 +810,8 @@ export class HostAdapter {
    */
   async #composePreset(presetId, memberId) {
     if (presetId === undefined) return { presetId: undefined, mount: async () => {} };
-    const presets = this.#presetRegistry();
-    const resolved = (await presets.resolve(presetId)).id;
-    return {
-      presetId: resolved,
-      mount: async (agentCtx) => {
-        await presets.mount(agentCtx, resolved);
-        this.emit({ type: 'member-preset-mounted', memberId, presetId: resolved });
-      },
-    };
+    const { id } = await this.#resolvePreset(presetId, memberId);
+    return { presetId: id, mount: (agentCtx) => this.#mountPreset(agentCtx, id, memberId) };
   }
 
   /** The `agentPresets` service, or a loud failure — never a silent no-op. */
@@ -822,6 +827,67 @@ export class HostAdapter {
   }
 
   /**
+   * Resolve a preset id, waiting out the activation race.
+   *
+   * The registry service exists long before a preset DECLARATION has registered:
+   * recovery runs ~1.3 s into activation, and `presets/*.patch.yml` rows may land
+   * after this plugin's own row. Measured after the 13:31 restart: the old room's
+   * sessions were resumed (`recovery.session.restored` recorded) yet gained no
+   * tools, which is what a `agent-preset/not-found` at that moment looks like.
+   *
+   * The wait is bounded and never touches `loader.await()`: this code runs INSIDE a
+   * Host row's activation, and awaiting the loader's settlement from here is the
+   * documented deadlock. Sleeping briefly lets the neighbouring rows finish instead.
+   *
+   * @param {string} presetId
+   * @param {string} memberId
+   * @returns {Promise<{ presets: object, id: string }>}
+   */
+  async #resolvePreset(presetId, memberId) {
+    const presets = this.#presetRegistry();
+    // One shared budget for the whole activation: if the declaration never registers,
+    // recovery must not spend the wait once per member (16 members × a full wait is
+    // a boot that looks hung). The first member that needs it pays; the rest fail
+    // fast with the same reason.
+    const budget = this.presetWaitBudget;
+    const started = Date.now();
+    const deadline = started + budget;
+    let lastError = null;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return { presets, id: (await presets.resolve(presetId)).id };
+      } catch (error) {
+        lastError = error;
+        this.#trace('member.preset.resolve-retry', {
+          memberId,
+          presetId,
+          attempt,
+          reason: String(error?.message ?? error),
+        });
+        if (Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    this.presetWaitBudget = Math.max(0, budget - (Date.now() - started));
+    this.#trace('member.preset.resolve-failed', {
+      memberId,
+      presetId,
+      reason: String(lastError?.message ?? lastError),
+      waitedMs: Date.now() - started,
+    });
+    throw lastError;
+  }
+
+  /** Write to the activation trace when one was supplied; a no-op otherwise. */
+  #trace(phase, detail) {
+    try {
+      this.tracer?.(phase, detail);
+    } catch {
+      /* tracing must never break a member session */
+    }
+  }
+
+  /**
    * Mount one preset into an agent context.
    *
    * @param {object} agentCtx
@@ -830,10 +896,47 @@ export class HostAdapter {
    * @returns {Promise<void>}
    */
   async #mountPreset(agentCtx, presetId, memberId) {
-    const presets = this.#presetRegistry();
-    const resolved = (await presets.resolve(presetId)).id;
-    await presets.mount(agentCtx, resolved);
-    this.emit({ type: 'member-preset-mounted', memberId, presetId: resolved });
+    // Retry the WHOLE resolve+mount pair, not just the resolve. Registering a preset
+    // sets its definition before its plugin tree finishes activating, and `mount`
+    // re-audits that tree — during a boot-time recovery the row can legitimately
+    // answer "not usable yet". That is a different error from "unknown id", and both
+    // are transient at this point in activation. Measured 2026-10-17 13:31: every old
+    // room resumed and no member gained a tool, which is what a swallowed failure here
+    // looks like from the outside.
+    const started = Date.now();
+    const budget = this.presetWaitBudget;
+    const deadline = started + budget;
+    let lastError = null;
+    for (let attempt = 1; ; attempt += 1) {
+      let resolved = presetId;
+      try {
+        const presets = this.#presetRegistry();
+        resolved = (await presets.resolve(presetId)).id;
+        await presets.mount(agentCtx, resolved);
+        this.presetWaitBudget = Math.max(0, budget - (Date.now() - started));
+        this.#trace('member.preset.mounted', { memberId, presetId: resolved, attempt });
+        this.emit({ type: 'member-preset-mounted', memberId, presetId: resolved });
+        return resolved;
+      } catch (error) {
+        lastError = error;
+        this.#trace('member.preset.mount-retry', {
+          memberId,
+          presetId: resolved,
+          attempt,
+          reason: String(error?.message ?? error),
+        });
+        if (Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    this.presetWaitBudget = Math.max(0, budget - (Date.now() - started));
+    this.#trace('member.preset.mount-failed', {
+      memberId,
+      presetId,
+      reason: String(lastError?.message ?? lastError),
+      waitedMs: Date.now() - started,
+    });
+    throw lastError;
   }
 
   /**

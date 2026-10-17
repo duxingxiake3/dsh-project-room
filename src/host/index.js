@@ -219,6 +219,9 @@ export async function apply(ctx, config = {}) {
     // this option existed records no preset, so the configured default has to live
     // on the adapter: otherwise a restart silently costs existing rooms their tools.
     agentPreset: options.memberAgentPreset,
+    // Preset mounting happens during recovery, before any room panel exists to show
+    // an error. The activation trace is where that outcome survives a restart.
+    trace: (phase, detail) => trace(phase, detail),
     // Real token usage from the member's own stream (the design notes). Wrapped so a
     // storage failure can never break a model call that already succeeded.
     onUsage: (invocation) => {
