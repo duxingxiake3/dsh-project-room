@@ -133,16 +133,49 @@ export class LoopGuard {
    * @param {object} [options]
    * @param {number} [options.maxAutomaticRounds] Soft cap on automatic wake-ups per chain.
    * @param {number} [options.repeatTolerance] Identical consecutive messages tolerated.
+   * @param {number} [options.maxAutomaticWakesPerMinute] Room-level backstop: automatic
+   *   wake-ups allowed in one room inside a rolling minute with no user message.
+   * @param {() => number} [options.now] Clock, injectable for tests.
    */
   constructor(options = {}) {
     this.maxAutomaticRounds = Number.isFinite(options.maxAutomaticRounds) ? options.maxAutomaticRounds : 12;
     this.repeatTolerance = Number.isFinite(options.repeatTolerance) ? options.repeatTolerance : 1;
+    /**
+     * The per-chain counter cannot catch a courtesy ping-pong by itself: each reply
+     * quotes the message it answers, so every message carries its target's id as
+     * `causalRootId` and every chain holds ONE round. Measured on the 2026-10-17 AT39
+     * trial: 274 messages, **241 distinct roots**, two members trading "无动作。"
+     * while `maxAutomaticRounds` never advanced.
+     *
+     * This counter is per ROOM and time-based instead, so forking roots cannot hide
+     * a runaway exchange. A productive discussion still passes: a user message
+     * resets it, and that trial's working phase stayed far below the limit.
+     */
+    this.maxAutomaticWakesPerMinute = Number.isFinite(options.maxAutomaticWakesPerMinute)
+      ? options.maxAutomaticWakesPerMinute
+      : 12;
+    this.now = typeof options.now === 'function' ? options.now : () => Date.now();
+    /** @type {Map<string, number[]>} */
+    this.roomWindows = new Map();
+    /** @type {Set<string>} */
+    this.roomBlocked = new Set();
     /** @type {Map<string, { rounds: number, wakes: string[], fingerprints: string[], lastAuthor: string | null }>} */
     this.chains = new Map();
     /** @type {Set<string>} */
     this.paused = new Set();
     /** @type {Array<{ roomId: string, causalRootId: string, reason: string, at: string }>} */
     this.incidents = [];
+  }
+
+  /** Prune and return the room's automatic wake-ups from the last minute. */
+  #recentRoomWakes(roomId) {
+    const cutoff = this.now() - 60_000;
+    const list = (this.roomWindows.get(roomId) ?? []).filter((at) => at > cutoff);
+    this.roomWindows.set(roomId, list);
+    // The block is a rate limit, not a sentence: once the window is empty the room
+    // runs again without waiting for a human. Only a human message resets it sooner.
+    if (list.length === 0) this.roomBlocked.delete(roomId);
+    return list;
   }
 
   /**
@@ -165,7 +198,39 @@ export class LoopGuard {
     if (input.authorKind === 'human') {
       this.chains.set(chainKey, { rounds: 0, wakes: [], fingerprints: [], lastAuthor: input.authorId });
       this.paused.delete(chainKey);
+      this.roomWindows.set(input.roomId, []);
+      this.roomBlocked.delete(input.roomId);
       return { allowed: true, reason: null, automatic: false };
+    }
+
+    // Room-level backstop, checked before anything chain-shaped: a quiet courtesy
+    // ping-pong never accumulates rounds on ONE chain (each reply forks a new root),
+    // so the room's automatic traffic itself has to be bounded. The window is
+    // evaluated on every check — that is also what lets it expire — and a user
+    // message clears it outright.
+    const recent = this.#recentRoomWakes(input.roomId);
+    if (recent.length >= this.maxAutomaticWakesPerMinute) {
+      if (!this.roomBlocked.has(input.roomId)) {
+        this.roomBlocked.add(input.roomId);
+        this.incidents.push({
+          roomId: input.roomId,
+          causalRootId: input.causalRootId,
+          reason: `本项目 60 秒内已自动唤醒 ${recent.length} 次且期间没有用户发言，已暂停自动推进。`,
+          at: new Date(this.now()).toISOString(),
+        });
+      }
+      return {
+        allowed: false,
+        reason: `本项目 60 秒内已自动唤醒 ${recent.length} 次且没有用户发言，已暂停自动推进以免空转；等这一分钟窗口过去或你发言后恢复。`,
+        automatic: true,
+      };
+    }
+    if (this.roomBlocked.has(input.roomId)) {
+      return {
+        allowed: false,
+        reason: '本项目因 60 秒内自动唤醒过多被暂停推进；等窗口过去或你发言后恢复。',
+        automatic: true,
+      };
     }
 
     if (this.paused.has(chainKey)) {
@@ -223,11 +288,23 @@ export class LoopGuard {
   record(input) {
     const chainKey = `${input.roomId}|${input.causalRootId}`;
     const chain = this.chains.get(chainKey) ?? { rounds: 0, wakes: [], fingerprints: [], lastAuthor: null };
-    // A round that carries new substance is not spending the chain's budget.
-    if (!addsNewSubstance(chain, input.body)) chain.rounds += 1;
+    // A round that carries new substance is not spending ANY budget — neither the
+    // chain's nor the room's. That is what keeps a 15-round exchange that asks a new
+    // question every time from being cut: the design notes forbids a fixed round cap, and
+    // an earlier version of this counter charged every wake and did exactly that.
+    const substantive = addsNewSubstance(chain, input.body);
+    if (!substantive) chain.rounds += 1;
     chain.lastAuthor = input.authorId;
     if (chain.fingerprints.length < 40) chain.fingerprints.push(fingerprint(input.body));
     this.chains.set(chainKey, chain);
+    if (!substantive) {
+      // `record` runs once per admitted delivery, so this counts turns that actually
+      // started. Only wakes that brought nothing are charged against the room
+      // backstop, because it exists to stop courtesy ping-pong, not work.
+      const recent = this.#recentRoomWakes(input.roomId);
+      recent.push(this.now());
+      this.roomWindows.set(input.roomId, recent);
+    }
   }
 
   /**

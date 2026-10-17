@@ -66,6 +66,7 @@ export class RecoveryService {
     const summary = {
       rooms: reports.length,
       sessionsRestored: reports.reduce((total, report) => total + (report.sessionsRestored ?? 0), 0),
+      sessionsSkipped: reports.reduce((total, report) => total + (report.sessionsSkipped ?? 0), 0),
       deliveriesReconciled: reports.reduce((total, report) => total + (report.deliveriesReconciled ?? 0), 0),
       uncertain: reports.reduce((total, report) => total + (report.uncertain ?? 0), 0),
       staleAttempts: reports.reduce((total, report) => total + (report.staleAttempts ?? 0), 0),
@@ -83,6 +84,13 @@ export class RecoveryService {
     const room = this.rooms.requireRoom(roomId);
     const needsUser = [];
     let sessionsRestored = 0;
+    let sessionsSkipped = 0;
+
+    // A paused or archived project must not come back to life on restart. Resuming a
+    // member session mounts its preset and leaves it one message away from spending
+    // tokens; before this check every restart resumed every room regardless of state,
+    // so "archive stops automatic execution" only held until the next boot.
+    const dormant = room.status !== 'active';
 
     // 3/4. Sessions: verify what exists, restore what this plugin owns.
     for (const member of this.store.listMembers(roomId, { includeRetired: true })) {
@@ -91,6 +99,10 @@ export class RecoveryService {
       const live = this.adapter.agentOf(member.id);
       if (live) {
         this.observer.attachMember({ memberId: member.id, roomId, agent: live });
+        continue;
+      }
+      if (dormant) {
+        sessionsSkipped += 1;
         continue;
       }
       if (!member.sessionId) {
@@ -174,6 +186,7 @@ export class RecoveryService {
     const lines = [
       `【恢复完成 · ${isoTimestamp()}】`,
       `恢复成员会话：${sessionsRestored} 个`,
+      sessionsSkipped > 0 ? `未恢复的成员会话：${sessionsSkipped} 个（项目处于暂停/归档状态，恢复执行前不会唤醒）` : null,
       `核对投递记录：${deliveriesReconciled} 条${uncertain > 0 ? `（其中 ${uncertain} 条状态不确定）` : ''}`,
       staleAttempts > 0 ? `需要核对的执行尝试：${staleAttempts} 个（未自动重跑，先核对副作用）` : null,
       needsUser.length > 0 ? `需要你处理：${needsUser.slice(0, 5).join('；')}` : '没有需要人工处理的遗留项。',
@@ -181,10 +194,10 @@ export class RecoveryService {
     ].filter(Boolean);
 
     this.store.setMeta(`recovery:${roomId}`, isoTimestamp());
-    this.store.appendEvent({ roomId, eventType: 'recovery.report', payload: { sessionsRestored, deliveriesReconciled, uncertain, staleAttempts, needsUser } });
+    this.store.appendEvent({ roomId, eventType: 'recovery.report', payload: { sessionsRestored, sessionsSkipped, deliveriesReconciled, uncertain, staleAttempts, needsUser } });
     this.rooms.publish(roomId, { type: 'recovery.report', roomId, text: lines.join('\n') });
 
-    return { roomId, title: room.title, sessionsRestored, deliveriesReconciled, uncertain, staleAttempts, needsUser, text: lines.join('\n') };
+    return { roomId, title: room.title, sessionsRestored, sessionsSkipped, deliveriesReconciled, uncertain, staleAttempts, needsUser, text: lines.join('\n') };
   }
 
   /**

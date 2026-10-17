@@ -471,4 +471,27 @@ describe('project room — restart and recovery', () => {
     assert.equal(byMember.get(designer.id)?.restrictTools, true, '设计成员恢复后必须和创建时一样受限');
     assert.equal(byMember.get(backend.id)?.restrictTools, false, '后端成员恢复后保留写入工具');
   });
+
+  it('does not resume the members of a paused or archived project', async (t) => {
+    // Before this, every restart resumed every room regardless of state, so
+    // "archive stops automatic execution" held only until the next boot: the
+    // sessions came back live and one mention was enough to spend tokens.
+    const dataDir = useTemporaryDataDir('recovery-dormant');
+    const stackA = createRoomStack({ dataDir });
+    const teamA = await createStandardRoom(stackA);
+    stackA.store.updateRoom(teamA.room.id, { status: 'archived' });
+    await stackA.close();
+
+    const stackB = createRoomStack({ dataDir, file: stackA.file });
+    t.after(() => stackB.close());
+    const report = await stackB.recovery.recoverRoom(teamA.room.id);
+
+    assert.equal(report.sessionsRestored, 0, '归档项目不得在重启时把成员会话拉起来');
+    assert.equal(report.sessionsSkipped, 4, '四个成员都记录为“因项目状态未恢复”');
+    assert.equal(stackB.host.createdAgents().length, 0, '进程里不应出现任何成员 Agent');
+    assert.match(report.text, /暂停\/归档/);
+    for (const member of teamA.members.filter((entry) => entry.kind === 'agent')) {
+      assert.equal(stackB.adapter.agentOf(member.id), null, '没有任何成员是活的');
+    }
+  });
 });

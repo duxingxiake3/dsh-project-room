@@ -1303,3 +1303,52 @@ describe('project room — composition root', () => {
     );
   });
 });
+
+describe('project room — paused and archived projects stop automatic execution', () => {
+  it('keeps an archived project readable but never wakes a member', async (t) => {
+    // the design notes: "归档项目 | 停止自动执行，保留消息、任务、决定、成果与模型绑定历史".
+    // Before this gate only `paused` was checked, so an archived project kept waking
+    // its members on every mention.
+    const stack = createRoomStack();
+    t.after(() => stack.close());
+    const { room, agents, human } = await createStandardRoom(stack);
+    stack.store.updateRoom(room.id, { status: 'archived' });
+
+    const sent = await stack.messages.send({
+      roomId: room.id,
+      authorId: human.id,
+      body: '@backend 这条在归档项目里不应该叫醒任何人',
+    });
+
+    assert.equal(sent.message.deliveries.length, 1);
+    assert.equal(sent.message.deliveries[0].status, 'paused', '归档项目的投递必须停在账本里');
+    assert.match(sent.message.deliveries[0].detail, /归档/);
+    assert.equal(deliveryCountOf(stack, agents.backend.id), 0, '归档期间不得唤醒成员');
+  });
+
+  it('keeps a paused project from waking a member too, with its own wording', async (t) => {
+    const stack = createRoomStack();
+    t.after(() => stack.close());
+    const { room, agents, human } = await createStandardRoom(stack);
+    stack.store.updateRoom(room.id, { status: 'paused' });
+
+    const sent = await stack.messages.send({ roomId: room.id, authorId: human.id, body: '@backend 暂停期间也别叫醒我' });
+
+    assert.equal(sent.message.deliveries[0].status, 'paused');
+    assert.match(sent.message.deliveries[0].detail, /暂停/);
+    assert.equal(deliveryCountOf(stack, agents.backend.id), 0);
+  });
+
+  it('restores an archived project to a stopped but resumable state', async (t) => {
+    const stack = createRoomStack();
+    t.after(() => stack.close());
+    const { room, agents, human } = await createStandardRoom(stack);
+    stack.store.updateRoom(room.id, { status: 'archived' });
+    stack.store.updateRoom(room.id, { status: 'active' });
+
+    const sent = await stack.messages.send({ roomId: room.id, authorId: human.id, body: '@backend 恢复后这条要真的送达' });
+
+    assert.equal(sent.message.deliveries[0].status, 'accepted');
+    assert.equal(deliveryCountOf(stack, agents.backend.id), 1);
+  });
+});

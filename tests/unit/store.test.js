@@ -335,3 +335,27 @@ describe('store — single writer', () => {
     assert.equal(existsSync(lock), false, 'closing must release our own lock');
   });
 });
+
+describe('store — room status is a closed set', () => {
+  it('accepts active, paused and archived', () => {
+    createRoom('room_status_ok');
+    for (const status of ['paused', 'archived', 'active']) {
+      assert.equal(store.updateRoom('room_status_ok', { status }).status, status);
+    }
+  });
+
+  it('refuses a status no execution gate recognises', () => {
+    // Every gate reads this column (delivery, recovery, reminders). A typo like
+    // "Archived" would otherwise leave a room that none of them treat as dormant.
+    createRoom('room_status_bad');
+    assert.throws(
+      () => store.updateRoom('room_status_bad', { status: 'Archived' }),
+      (error) => error instanceof RoomError && error.code === 'INVALID_REQUEST',
+    );
+    assert.throws(
+      () => store.updateRoom('room_status_bad', { status: 'deleted' }),
+      (error) => error instanceof RoomError && error.code === 'INVALID_REQUEST',
+    );
+    assert.equal(store.getRoom('room_status_bad').status, 'active', 'a refused write must not change the row');
+  });
+});

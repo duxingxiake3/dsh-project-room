@@ -2371,13 +2371,28 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
         [state, loadRoom],
       );
 
+      const setRoomStatus = useCallback(
+        async (status) => {
+          if (!state?.room || status === state.room.status) return;
+          if (status === 'archived' && !window.confirm('归档会停止这个项目的自动执行，保留聊天记录、任务、决定与源码，之后可以恢复。继续？')) {
+            return;
+          }
+          try {
+            await post('room.update', { roomId: state.room.id, status });
+            await loadRoom(state.room.id);
+          } catch (failure) {
+            setError(String(failure?.message ?? failure));
+          }
+        },
+        [state, loadRoom],
+      );
+
       const changeModel = useCallback(
         async (member, profileRef) => {
           try {
             const result = await post('room.member.model.set', {
               roomId: state.room.id,
-              memberId: member.id,
-              profileRef,
+              memberId: member.id,              profileRef,
               expectedConfigRevision: member.modelConfigRevision,
               source: 'member-fixed',
             });
@@ -2460,6 +2475,19 @@ const M = { MentionResolver, mergeMentions, segmentsForDisplay, stripMentionSynt
                   })
                 : null,
               jsx('button', { type: 'button', className: `${P}btn`, onClick: () => setCreating(true), children: '新建项目群' }),
+              state
+                ? jsx('select', {
+                    className: `${P}select`,
+                    value: state.room.status,
+                    title: '项目状态：进行中 / 已暂停 / 已归档（归档保留历史与源码，可恢复）',
+                    onChange: (event) => void setRoomStatus(event.target.value),
+                    children: [
+                      jsx('option', { value: 'active', children: '状态：进行中' }),
+                      jsx('option', { value: 'paused', children: '状态：已暂停' }),
+                      jsx('option', { value: 'archived', children: '状态：已归档' }),
+                    ],
+                  })
+                : null,
               state ? jsx('button', { type: 'button', className: `${P}btn ${P}btnGhost`, onClick: () => void loadRoom(state.room.id), children: '刷新' }) : null,
             ],
           }),

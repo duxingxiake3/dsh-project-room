@@ -121,11 +121,18 @@ export class DeliveryCoordinator {
         continue;
       }
 
-      if (room.status === 'paused') {
+      // Archive is "stop automatic execution, keep history" (the design notes) — the same
+      // gate as pause, with wording that says which state did it. Before this,
+      // `archived` was not checked at all: an archived project would keep waking its
+      // members on every mention.
+      if (room.status !== 'active') {
+        const archived = room.status === 'archived';
         const updated = this.store.upsertDelivery({
           ...delivery,
           status: 'paused',
-          detail: '项目已暂停，聊天仍可查看并输入，但不会静默恢复执行。',
+          detail: archived
+            ? '项目已归档：保留历史与源码，不再自动执行；恢复后由你决定何时继续。'
+            : '项目已暂停，聊天仍可查看并输入，但不会静默恢复执行。',
           updatedAt: isoTimestamp(),
         });
         results.push(this.#view(recipient.id, recipient.displayName, updated.status, updated.detail));

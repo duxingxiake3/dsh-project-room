@@ -182,14 +182,28 @@ export function registerRoomRoute(services) {
       }
 
       case 'room.update': {
-        return {
-          room: store.updateRoom(payload.roomId, {
-            ...(payload.title === undefined ? {} : { title: payload.title }),
-            ...(payload.status === undefined ? {} : { status: payload.status }),
-            ...(payload.workspaceRef === undefined ? {} : { workspaceRef: payload.workspaceRef }),
-            ...(payload.config === undefined ? {} : { config: { ...rooms.requireRoom(payload.roomId).config, ...payload.config } }),
-          }),
-        };
+        const updated = store.updateRoom(payload.roomId, {
+          ...(payload.title === undefined ? {} : { title: payload.title }),
+          ...(payload.status === undefined ? {} : { status: payload.status }),
+          ...(payload.workspaceRef === undefined ? {} : { workspaceRef: payload.workspaceRef }),
+          ...(payload.config === undefined ? {} : { config: { ...rooms.requireRoom(payload.roomId).config, ...payload.config } }),
+        });
+        // Coming back to `active` has to wake the members up. Recovery deliberately
+        // skips paused/archived rooms (so a restart cannot bring them back to life),
+        // which leaves them with no live sessions; without this step a resumed project
+        // accepted input but every delivery parked as "该成员当前没有活动会话".
+        if (payload.status === 'active') {
+          const members = store.listMembers(payload.roomId, { includeRetired: false });
+          for (const member of members) {
+            if (member.kind !== 'agent' || member.status === 'offline') continue;
+            try {
+              await ensureMemberSession({ memberId: member.id, roomId: payload.roomId });
+            } catch (error) {
+              logger?.warn?.(`[project-room] resume ${member.id} on project activate failed: ${error?.message ?? error}`);
+            }
+          }
+        }
+        return { room: updated };
       }
 
       case 'room.member.add': {

@@ -112,6 +112,16 @@ export const Config = {
       if (typeof merged.maxAutomaticRounds !== 'number' || !Number.isFinite(merged.maxAutomaticRounds) || merged.maxAutomaticRounds <= 0) {
         issues.push({ message: 'maxAutomaticRounds 必须是正数；0 或负数会让所有自动协作被立即暂停。', path: ['maxAutomaticRounds'] });
       }
+      if (
+        typeof merged.maxAutomaticWakesPerMinute !== 'number' ||
+        !Number.isFinite(merged.maxAutomaticWakesPerMinute) ||
+        merged.maxAutomaticWakesPerMinute <= 0
+      ) {
+        issues.push({
+          message: 'maxAutomaticWakesPerMinute 必须是正数；它是防止空转烧钱的房间级兜底。',
+          path: ['maxAutomaticWakesPerMinute'],
+        });
+      }
       for (const key of ['httpRoute', 'autoCreateSessions', 'autoResume', 'publishFinalReplies', 'reminders']) {
         if (merged[key] !== undefined && typeof merged[key] !== 'boolean') {
           issues.push({ message: `${key} 必须是 true 或 false。`, path: [key] });
@@ -135,6 +145,12 @@ export const DEFAULT_CONFIG = Object.freeze({
   restrictedToolDeny: ['bash', 'pwsh', 'shell', 'write', 'edit', 'str_replace_editor', 'apply_patch'],
   /** Automatic wake-ups allowed per causal chain before the guard pauses it. */
   maxAutomaticRounds: 12,
+  /**
+   * Room-level backstop: automatic wake-ups allowed inside one rolling minute with no
+   * user message. Needed because a reply-oriented exchange forks a new causal root
+   * per message, so the per-chain cap never accumulates.
+   */
+  maxAutomaticWakesPerMinute: 12,
   /** Whether the HTTP route is registered (tests disable it). */
   httpRoute: true,
   /** Whether member sessions are created on room creation. */
@@ -285,7 +301,10 @@ export async function apply(ctx, config = {}) {
    * ------------------------------------------------------------------ */
   const rooms = new RoomService({ store, adapter, logger });
   const context = new ContextBuilder({ store });
-  const guard = new LoopGuard({ maxAutomaticRounds: options.maxAutomaticRounds });
+  const guard = new LoopGuard({
+    maxAutomaticRounds: options.maxAutomaticRounds,
+    maxAutomaticWakesPerMinute: options.maxAutomaticWakesPerMinute,
+  });
   const models = new ModelProfileService({ store, adapter, logger });
   const tasks = new TaskService({ store, rooms, guard, logger });
   const artifacts = new ArtifactService({ store, rooms, tasks, logger });

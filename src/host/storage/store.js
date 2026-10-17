@@ -37,6 +37,13 @@ import { backupDir, databasePath, ensureDir, lockPath } from './paths.js';
 /** Bump when the schema changes; migrations below must handle every older value. */
 export const SCHEMA_VERSION = 2;
 
+/**
+ * The only room states the product defines (the design notes): active, paused, archived.
+ * Every execution gate reads this column, so an unknown value is refused at the
+ * write rather than silently disabling all of them.
+ */
+export const ROOM_STATUSES = new Set(['active', 'paused', 'archived']);
+
 const SCHEMA = `
 create table if not exists meta (
   key   text primary key,
@@ -601,6 +608,13 @@ export class RoomStore {
    * @param {object} patch
    */
   updateRoom(roomId, patch) {
+    // The status column is the one field every execution gate reads (delivery,
+    // recovery, reminders), so it may not be an arbitrary string: before this check
+    // `room.update` accepted anything, which would let a typo ("Archived") leave a
+    // room that no gate recognises. the design notes only defines these three.
+    if (patch.status !== undefined && !ROOM_STATUSES.has(patch.status)) {
+      throw new RoomError('INVALID_REQUEST', `项目状态只能是 ${[...ROOM_STATUSES].join(' / ')}，收到 "${String(patch.status)}"。`);
+    }
     const columns = {
       title: 'title',
       status: 'status',
