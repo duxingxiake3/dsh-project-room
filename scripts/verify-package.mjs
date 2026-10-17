@@ -121,7 +121,6 @@ const REQUIRED_PATHS = [
   'cordis.patch.yml',
   'README.md',
   'README.zh.md',
-  'development checkpoint',
   'assets/icon.svg',
   'shared/contracts.js',
   'shared/mention-resolver.js',
@@ -486,10 +485,7 @@ await check('the named promises exist in the extracted package', () => {
   for (const path of REQUIRED_PATHS) {
     assert.ok(existsSync(join(pkgDir, path)), `${path} is absent from the extracted package`);
   }
-  const docs = readdirSync(join(pkgDir, 'docs'));
-  assert.ok(docs.length > 0, 'notes/ must ship at least one file');
-  for (const name of docs) assert.ok(existsSync(join(pkgDir, 'docs', name)), `notes/${name} is absent`);
-  return `${REQUIRED_PATHS.length} named path(s) + notes/ (${docs.length} file(s))`;
+  return `${REQUIRED_PATHS.length} named path(s) present`;
 });
 
 await check('the packaged package.json keeps the fields the loader reads', () => {

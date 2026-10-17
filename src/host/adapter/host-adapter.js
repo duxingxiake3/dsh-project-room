@@ -7,8 +7,8 @@
  *
  * Verified against the desktop host PACKAGED runtime **0.2.0-rc.2**
  * (`<DSH-APP>\resources\app.asar\dsh\node_modules\@deepseek-ai\*`, Electron 44 /
- * Node 24.18.1) — see `notes/host notes` for the exact evidence behind
- * every method below. A second, different install (`0.1.7-rc.1`) exists on this
+ * Node 24.18.1) — the evidence behind every method below was read from that copy,
+ * not assumed. A second, different install (`0.1.7-rc.1`) exists on this
  * machine and is NOT the live one; `scripts/read-asar.mjs` exists so the packaged
  * copy can be read directly instead of assumed. Facts this file depends on:
  *

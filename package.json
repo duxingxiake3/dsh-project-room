@@ -29,9 +29,7 @@
     "assets/",
     "cordis.patch.yml",
     "README.md",
-    "README.zh.md",
-    "notes/",
-    "development checkpoint"
+    "README.zh.md"
   ],
   "scripts": {
     "build": "node --experimental-vm-modules scripts/build-client.mjs",

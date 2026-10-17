@@ -25,9 +25,9 @@ Thumbs.db
 # Packed release artifact (`npm run pack`): reproducible from the tree, never committed.
 *.tgz
 
-# Captured verification output. Kept OUT of `notes/` on purpose: `notes/` is in the
-# manifest's `files` list, so writing a record there changes what the package
-# promises and makes the tarball stale the moment the record is written — which is
-# exactly what happened, and what the "missing nothing the manifest promises" check
-# caught. Local, timestamped evidence belongs beside `.tmp/`, not inside the package.
+# Captured verification output. Kept OUT of the package on purpose: anything inside
+# a path the manifest's `files` list promises changes what the package contains and
+# makes the tarball stale the moment the record is written — which is exactly what
+# happened, and what the "missing nothing the manifest promises" check caught.
+# Local, timestamped evidence belongs beside `.tmp/`, not inside the package.
 .evidence/

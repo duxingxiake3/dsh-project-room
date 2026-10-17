@@ -100,7 +100,7 @@ describe('package metadata — loader contract', () => {
 
   it('declares an engines range that includes the runtime actually measured', () => {
     // Measured from the running host: the packaged desktop runtime resolves to
-    // 0.2.0-rc.2 (see notes/host notes). The range must not exclude it.
+    // 0.2.0-rc.2. The range must not exclude it.
     assert.equal(typeof manifest.engines?.dsh, 'string');
     const range = manifest.engines.dsh;
     assert.ok(/<0\.3\.0/.test(range), `the upper bound must admit 0.2.0-rc.2, got ${range}`);
