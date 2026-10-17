@@ -296,9 +296,10 @@ export class HostAdapter {
    * Create a plugin-owned root session for one member.
    *
    * `setup` runs before the agent is published, which is where the member's
-   * identity (`agent/request` route), persona prompt, and per-member tool
-   * restriction are installed. Nothing about the member is added after the fact,
-   * so the first request already carries the right model and instructions.
+   * identity (`agent/request` route), persona prompt, preset mount, and
+   * per-member tool restriction are installed. Nothing about the member is added
+   * after the fact, so the first request already carries the right model, the
+   * right tools and the right instructions.
    *
    * @param {object} input
    * @param {string} input.memberId
@@ -310,6 +311,7 @@ export class HostAdapter {
    * @param {{ providerRoute: string, modelId: string } | null} input.model
    * @param {string} input.personaInstructions
    * @param {boolean} [input.restrictTools]
+   * @param {string} [input.agentPreset]  Preset to mount; unset keeps the host composition.
    * @returns {Promise<{ sessionId: string }>}
    */
   async createMember(input) {
@@ -321,6 +323,15 @@ export class HostAdapter {
     const selection = { current: input.model ? { ...input.model } : null };
     const adapter = this;
 
+    // Resolved BEFORE the Agent exists, because the two halves of a preset are
+    // separate host contracts: `meta.agentPreset` only writes the creation header
+    // (`SessionStore.prepare`), while the plugin tree that actually carries
+    // `tool-fs` / `tool-pwsh` is mounted by `agentPresets.mount()` inside `setup`.
+    // The Web host does exactly this pair in its own `composeAgent()`
+    // (`dsh-api-session-controller`). Measured 2026-10-17: with the header alone, a
+    // fresh member still listed 16 room tools and no `pwsh`/`write`.
+    const composition = await this.#composePreset(input.agentPreset, input.memberId);
+
     // `ctx.agents.create(options)` is the registry facade: ownership follows the
     // context the call is made from (the plugin fiber), while the
     // `createAgent(ownerCtx, options)` form belongs to the AgentFactory on
@@ -330,12 +341,12 @@ export class HostAdapter {
       sessionId,
       meta: {
         cwd: input.cwd,
-        ...(input.agentPreset === undefined ? {} : { agentPreset: input.agentPreset }),
+        ...(composition.presetId === undefined ? {} : { agentPreset: composition.presetId }),
       },
       agentOptions: input.model
         ? { provider: input.model.providerRoute, model: input.model.modelId }
         : {},
-      setup: (agentCtx, agent) => {
+      setup: async (agentCtx, agent) => {
         // 1. This member's real model route for every request, including a later
         //    hot switch, without restarting the session.
         agentCtx.on('agent/request', async (payload, next) => {
@@ -371,10 +382,20 @@ export class HostAdapter {
           });
         }
 
-        // 3. Per-member tool surface. A detail-only member (designer, docs) gets
-        //    coordination tools but no shell or file writers, so "no permission to
-        //    change code" is enforced rather than requested.
-        adapter.#restrictWriteTools(agentCtx, input.memberId);
+        // 3. The preset's plugins, BEFORE the Agent is published. This is the step
+        //    that gives the member `write`, `edit`, `pwsh` and the rest: without it
+        //    the session only ever sees this plugin's own scope. A failure here
+        //    rejects creation, so a configured preset cannot be silently ignored.
+        await composition.mount(agentCtx);
+
+        // 4. Per-member tool surface, AFTER the mount. The deny list is intersected
+        //    with the tools actually exposed, and a preset's tools do not exist yet
+        //    at the top of `setup` — computing it there silently restricted nothing.
+        //    Only detail-only members (designer, docs) get restricted, so
+        //    "no permission to change code" is enforced rather than requested.
+        if (input.restrictTools) {
+          adapter.#restrictWriteTools(agentCtx, input.memberId);
+        }
         return undefined;
       },
     });
@@ -394,6 +415,7 @@ export class HostAdapter {
    * @param {string} [input.personaInstructions]
    * @param {boolean} [input.restrictTools]
    * @param {string} [input.cwd]
+   * @param {string} [input.agentPreset]  Fallback preset for a session whose header recorded none.
    * @returns {Promise<{ sessionId: string }>}
    */
   async resumeMember(input) {
@@ -406,7 +428,7 @@ export class HostAdapter {
     const handle = await ctx.agents.resume({
       resumeSessionId: input.sessionId,
       agentOptions: input.model ? { provider: input.model.providerRoute, model: input.model.modelId } : {},
-      setup: (agentCtx) => {
+      setup: async (agentCtx, agent) => {
         agentCtx.on('agent/request', async (payload, next) => {
           const proposed = await next();
           const current = selection.current;
@@ -432,6 +454,24 @@ export class HostAdapter {
             order: 40,
             text: () => input.personaInstructions,
           });
+        }
+        // The session header records the preset this session STARTED under, and a
+        // resumed agent has a fresh context: re-mount it, or the member loses its
+        // tools on every host restart. `select()` is not an option here — it refuses
+        // a session that has already started. Falling back to the configured preset
+        // is what upgrades members created before this option existed.
+        //
+        // A failure is reported, not thrown: one unusable preset must not make
+        // recovery fail for every room in the database.
+        const recorded = agent?.session?.header?.agentPreset ?? input.agentPreset;
+        if (recorded !== undefined) {
+          try {
+            await adapter.#mountPreset(agentCtx, recorded, input.memberId);
+          } catch (error) {
+            const reason = String(error?.message ?? error);
+            adapter.logger?.warn?.(`[project-room] cannot mount preset "${recorded}" for ${input.memberId}: ${reason}`);
+            adapter.emit({ type: 'member-preset-mount-failed', memberId: input.memberId, presetId: recorded, reason });
+          }
         }
         if (input.restrictTools) {
           adapter.#restrictWriteTools(agentCtx, input.memberId);
@@ -717,6 +757,70 @@ export class HostAdapter {
   /** The live agent for a member, when this plugin owns one. */
   agentOf(memberId) {
     return this.members.get(memberId)?.handle?.agent ?? null;
+  }
+
+  /**
+   * Resolve a configured preset and prepare its mount callback.
+   *
+   * There are TWO host contracts behind "the member runs preset X", and only
+   * doing both gives the member that preset's tools:
+   *
+   * 1. `meta.agentPreset` — recorded in the session creation header by
+   *    `SessionStore.prepare`. This is what a later resume reads, and it is why a
+   *    member that "started under standard" says so.
+   * 2. `agentPresets.mount(agentCtx, id)` — actually mounts the preset's plugin
+   *    tree in the agent's context. That tree is where `tool-fs`, `tool-pwsh`,
+   *    `tool-fs-search` and `tool-jobs` live. Without it the session sees only
+   *    this plugin's own scope; measured 2026-10-17, a fresh member with the
+   *    header alone listed 16 room tools and no `pwsh`/`write`.
+   *
+   * The Web host pairs them the same way in `dsh-api-session-controller`'s
+   * `composeAgent()`. `resolve()` also rejects with the list of known ids, which
+   * is the error a deployment needs: a typo must not quietly leave members
+   * without tools.
+   *
+   * @param {string|undefined} presetId
+   * @param {string} memberId
+   * @returns {Promise<{ presetId: string|undefined, mount: (agentCtx: object) => Promise<void> }>}
+   */
+  async #composePreset(presetId, memberId) {
+    if (presetId === undefined) return { presetId: undefined, mount: async () => {} };
+    const presets = this.#presetRegistry();
+    const resolved = (await presets.resolve(presetId)).id;
+    return {
+      presetId: resolved,
+      mount: async (agentCtx) => {
+        await presets.mount(agentCtx, resolved);
+        this.emit({ type: 'member-preset-mounted', memberId, presetId: resolved });
+      },
+    };
+  }
+
+  /** The `agentPresets` service, or a loud failure — never a silent no-op. */
+  #presetRegistry() {
+    const presets = this.ctx.get('agentPresets');
+    if (presets === undefined || typeof presets.resolve !== 'function' || typeof presets.mount !== 'function') {
+      throw new RoomError(
+        'HOST_CAPABILITY_MISSING',
+        '当前宿主没有 agentPresets 服务，无法把成员会话挂到预设上；memberAgentPreset 需要宿主提供预设注册表。',
+      );
+    }
+    return presets;
+  }
+
+  /**
+   * Mount one preset into an agent context.
+   *
+   * @param {object} agentCtx
+   * @param {string} presetId
+   * @param {string} memberId
+   * @returns {Promise<void>}
+   */
+  async #mountPreset(agentCtx, presetId, memberId) {
+    const presets = this.#presetRegistry();
+    const resolved = (await presets.resolve(presetId)).id;
+    await presets.mount(agentCtx, resolved);
+    this.emit({ type: 'member-preset-mounted', memberId, presetId: resolved });
   }
 
   /**

@@ -371,6 +371,11 @@ export async function apply(ctx, config = {}) {
             personaInstructions,
             restrictTools,
             cwd,
+            // Only a fallback: the session header is the truth about what a resumed
+            // session started under. This matters for members created before the
+            // option existed — they have no preset recorded and would otherwise
+            // resume just as tool-less as they were created.
+            agentPreset: options.memberAgentPreset,
           })
         : await adapter.createMember({
             memberId: member.id,

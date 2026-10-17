@@ -10,6 +10,12 @@ node_modules/
 *.sqlite-shm
 _probe/probe-report.json
 
+# Sandbox ACL diagnostics. Written by a repair tool when a confined write is
+# denied: it names this machine's absolute paths, its DACL and the user's SID.
+# One such run was committed by accident and had to be removed from history —
+# this line is what keeps the next one out.
+.dsh-acl-reports/
+
 # Scratch and editor noise
 .tmp/
 *.log
