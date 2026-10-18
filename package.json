@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/duxingxiake3/dsh-project-room.git"
+  },
   "description": "项目群 / Project Room — 面向 DeepSeek Harness 的持久项目群聊：每个项目一个群，主代理加专业成员、平等双向 @ 沟通、按成员独立选模型，以及由真实执行与证据驱动的任务/验收流程。A persistent project group chat for DeepSeek Harness: one room per project, a coordinator agent plus specialist members, equal two-way @ communication, per-member models, and real task/acceptance flow.",
   "license": "MIT",
   "icon": "./assets/icon.svg",
