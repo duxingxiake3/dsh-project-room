@@ -76,6 +76,18 @@ describe('package metadata — declared paths exist', () => {
   });
 });
 
+describe('package metadata — display introduction', () => {
+  it('introduces the plugin in both Chinese and English', () => {
+    // The plugin manager lists a bundle by its exported locale `meta`, falling
+    // back to `package.json.description`, so this field is the introduction a
+    // user actually reads on the plugin card and its detail page.
+    const description = manifest.description;
+    assert.equal(typeof description, 'string', 'the introduction must be a non-empty string');
+    assert.match(description, /[\u4e00-\u9fff]/, 'the introduction must carry a Chinese sentence');
+    assert.match(description, /Project Room/, 'the introduction must carry an English sentence');
+  });
+});
+
 describe('package metadata — loader contract', () => {
   it('names the bundle patch the loader reads', () => {
     const patch = manifest.dsh?.bundle?.patch;
