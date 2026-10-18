@@ -214,3 +214,9 @@ npm run harness
 # Pack and verify the package contents
 npm run pack:verify
 ```
+
+---
+
+## 10. Technical documentation
+
+- [Deep research — technical documentation](docs/deep-research.md) — state machine, approval and scope freeze, budget ledger, dedicated research sessions, evidence protocol, data model, threat model, recovery and test coverage.

@@ -230,3 +230,9 @@ dsh-project-room: failed
 
 - `tests/unit/activation-contract.test.js` —— `inject` 声明必须覆盖 `apply()` 读到的每个服务（否则 Cordis 直接抛错，插件永远不激活）；浏览器半边不得引用任何 chunk。
 - `tests/unit/client-materialize.test.js` —— 按真实加载器契约在 Node 里物化浏览器半边，断言它只注册 `sidebar.panellist:project-room` 与 `main:project-room`，且只依赖 `react` / `react/jsx-runtime`。
+
+---
+
+## 10. 技术文档
+
+- [深度研究技术文档](docs/deep-research.zh.md)——状态机、审批与范围冻结、预算账本、专用研究会话、证据协议、数据模型、威胁模型、恢复与测试覆盖。
