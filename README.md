@@ -1,23 +1,26 @@
 # Project Room (dsh-project-room)
 
-一个项目 = 一个持续存在的群聊。用户、主代理、前端、后端、测试、运维都在同一条群消息时间线上沟通，同时各自拥有**真实独立**的 Harness 会话、自己的工作上下文和真实的执行能力。
+English | [中文](README.zh.md)
 
-这不是一个聊天界面皮肤：群里的每条投递都落到真实会话，任务状态只由真实执行与证据驱动，模型按成员独立路由。
+One project = one persistent group chat. The user, the coordinator agent, frontend, backend, testing and ops all talk on the same group-message timeline, while each of them has a **genuinely independent** Harness session, its own working context and real execution capability.
+
+This is not a chat-UI skin: every delivery in the room lands in a real session, task state is driven only by real execution and evidence, and models are routed per member.
 
 ---
 
-## 1. 安装与启用
+## 1. Install and enable
 
-插件是**免安装依赖**的纯 ESM 包：host 半边只 import Node 内置模块，浏览器半边是自注册的 classic script，因此不需要构建工具链，也不需要在 profile 里额外安装任何包。
+The plugin is a pure ESM package with **no installed dependencies**: the host half imports only Node built-ins, and the browser half is a self-registering classic script. No build toolchain and no extra package in the profile is needed.
 
 ```powershell
-# 先克隆本仓库
+# Clone this repository first
 git clone https://github.com/duxingxiake3/dsh-project-room.git
-# 再在 Harness 的插件管理里安装克隆目录（等价于 dsh plugin install）
-#   目标：<REPO>
+# Then install the cloned directory as a local path in Harness's plugin manager
+# (equivalent to dsh plugin install)
+#   target: <REPO>
 ```
 
-安装后 profile 的 `package.json` 会出现一条 `link:` 依赖，`cordis.patch.yml` 会出现：
+After installation the profile's `package.json` gains a `link:` dependency, and `cordis.patch.yml` gains:
 
 ```yaml
 - insert:
@@ -25,192 +28,189 @@ git clone https://github.com/duxingxiake3/dsh-project-room.git
       name: 'dsh-project-room'
 ```
 
-启用成功后会写入一份启动记录，用来事后核对“到底跑的是哪个版本”：
+A successful activation writes a boot record, so you can check afterwards "which version is actually running":
 
 ```
 <DSH_HOME>/storages/project-room/boot-report.json
 ```
 
-`boot-report.json` 包含解析到的核心版本、解析来源文件路径、已注册工具名、当前上下文实际可用的工具名、能力标志，以及每次激活的历史。若版本一栏是 `unknown`，插件会在界面上明确提示兼容性未验证，而不是假装可用。
+`boot-report.json` records the resolved core version, the file path it was resolved from, the registered tool names, the tool names actually available in the current context, capability flags, and the history of every activation. If the version cannot be determined, the plugin explicitly flags compatibility as unverified in the UI instead of pretending the version is usable.
 
-### 停用与卸载
+### Disable and uninstall
 
-- **停用**：插件管理里关闭 `project-room` 条目。已启动的任务按现有设置继续；再次启用时按 `boot-report.json` 与群数据库恢复。
-- **卸载**：插件管理里移除 `dsh-project-room`。**删除插件不会删除项目历史**；群数据库、消息、任务、决定与成果都保留在 `<DSH_HOME>/storages/project-room/rooms.sqlite`，重新安装即可继续。
-- 彻底清理是单独操作：关闭插件后删除该目录。
-- 插件不会销毁“借用的用户会话”（见第 6 节）。
+- **Disable**: turn off the `project-room` entry in the plugin manager. Already-started tasks continue under the current settings; enabling it again restores from `boot-report.json` and the room database.
+- **Uninstall**: remove `dsh-project-room` in the plugin manager. **Removing the plugin does not remove project history**; the room database, messages, tasks, decisions and outcomes remain in `<DSH_HOME>/storages/project-room/rooms.sqlite`, and reinstalling resumes from there.
+- A full cleanup is a separate operation: disable the plugin, then delete that directory.
+- The plugin never destroys a "borrowed user session" (see section 6).
 
 ---
 
-## 2. 建群
+## 2. Create a room
 
-打开左侧栏的**项目群**图标 → **新建项目群**。
+Open the **Project Room** icon in the left sidebar → **New project room**.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| 群名称 | 任意，例如“验证码登录功能”。 |
-| 工作区目录 | 成员真实执行任务的工作目录（成员会话的 `cwd`）。可留空，之后在群设置里补。 |
-| 整体目标 | 交付给主代理的目标。提交后主代理会拆分工作、安排成员并推进。 |
-| 初始成员 | 勾选主代理 / 前端 / 后端 / 测试 / 运维 / 设计 / 文档；也可只建主代理，之后再按需补齐。 |
-| 每位成员的模型 | 每位成员可以单独选择模型，也可留空走角色/项目默认。选项来自宿主真实已接入的提供方与模型 ID。 |
+| Room name | Anything, e.g. "SMS login feature". |
+| Workspace directory | The working directory where members actually execute tasks (the `cwd` of member sessions). May be left empty and filled in later in room settings. |
+| Overall goal | The goal handed to the coordinator. After submission the coordinator breaks it down, assigns members and drives it forward. |
+| Initial members | Tick coordinator / frontend / backend / testing / ops / design / docs; or create only the coordinator and add the rest as needed later. |
+| Model per member | Each member may select a model individually, or leave it empty to follow the role/project default. Options come from the providers and model IDs that are really wired up in the host. |
 
-建群会在**一个事务**里写完群、成员与 `room.created` 事件，然后再创建成员会话。中断不会留下半个团队；成员身份先落盘，因此恢复时能核对而不是重建一个人。
+Creating a room writes the room, its members and the `room.created` event **in one transaction**, and only then creates member sessions. An interruption never leaves half a team; member identities land first, so recovery verifies them instead of rebuilding a person.
 
 ---
 
-## 3. 每位成员独立选模型
+## 3. Each member picks its own model
 
-三层配置，优先级从低到高：
+Three layers of configuration, lowest to highest priority:
 
-| 层级 | 位置 | 说明 |
+| Layer | Location | Description |
 |---|---|---|
-| 项目默认 | 群设置 → 模型 | 没有单独配置的成员使用。 |
-| 角色默认 | 群设置 → 模型 → 角色默认 | 按 frontend/backend/tester/devops 预设。 |
-| 成员专属 | 成员详情 → 模型 | 指定到具体 memberId，优先级最高。 |
-| 允许池自动选型 | 群设置 → 模型 → 选型模式 | 用户启用后，主代理在**允许池内**为新成员/新任务选型并公开理由；不覆盖被锁定的成员。 |
+| Project default | Room settings → Models | Used by members without their own configuration. |
+| Role default | Room settings → Models → Role defaults | Presets per frontend/backend/tester/devops. |
+| Member-specific | Member details → Model | Bound to a specific memberId; highest priority. |
+| Allowed-pool auto-selection | Room settings → Models → Selection mode | Once enabled, the coordinator picks a model **within the allowed pool** for new members/new tasks and publishes the reason; members that are locked are not overridden. |
 
-默认是 `fixed`：由用户固定每位成员，不会偷偷换成别的模型。
+The default is `fixed`: the user pins each member, and no model is silently swapped.
 
-**切换语义（安全边界）**：成员详情里选好模型点“应用模型”后，当前正在进行的请求沿用旧路由，**下一次请求**使用新模型；成员身份、头像、昵称、`@` 名称和任务归属全部不变，也不会重建会话或重复工具副作用。切换会记录配置版本与原因，旧结果保留旧来源。
+**Switch semantics (safety boundary)**: after selecting a model in member details and clicking "Apply model", the request currently in flight keeps its old route and the **next request** uses the new model; member identity, avatar, display name, `@` name and task ownership all stay unchanged, and the session is not recreated nor tool side effects repeated. A switch records the config revision and the reason, and old results keep their old provenance.
 
-“实际路由”一行显示的是**真实请求时观测到的**提供方/模型，而不是配置里写了什么——只有真正跑过一次，它才会出现。
+The "actual route" line shows the provider/model **observed on a real request**, not what the configuration says — it appears only after a call has actually run.
 
-模型标识必须写成宿主已接入的 `提供方/模型ID`。口头品牌名（“用 GLM 吧”）不会被当作模型 ID；目录读取失败或凭据失效的提供方会显示为不可用并给出原因，而不是从列表里消失。
+Model identifiers must be written as the `provider/modelID` the host has wired up. Spoken brand names ("use GLM") are not treated as model IDs; a provider whose catalogue cannot be read or whose credentials are invalid is shown as unavailable with a reason, rather than disappearing from the list.
 
 ---
 
-## 4. 三种 @，以及怎么把整体任务交出去
+## 4. The three kinds of @, and how to hand off the overall task
 
-### 4.1 三种合法输入方式
+### 4.1 Three legal input paths
 
-| 方式 | 操作 | 行为 |
+| Path | Operation | Behaviour |
 |---|---|---|
-| 头像右键“@ 他” | 右键（触屏长按 / 键盘 Enter）任意头像 | 把该成员作为接收人，**不自动发送**，原草稿保留。对自己显示“@ 自己”，只作留注记，不触发模型。 |
-| 输入 `@` 选人 | 输入框里输入 `@` 或全角 `＠` | 弹出本群成员列表；按显示名/handle/角色/别名筛选；↑↓ 移动、Enter/Tab 选人、Esc 关闭。第一项是“所有人”，并显示会触达几位 AI 成员。 |
-| 直接输入 `@名字` | 例如 `@后端，接口字段怎么变了？` | 服务器用确定性规则解析成与芯片相同的 memberId 列表，不要求重新打开选人框。 |
+| Right-click an avatar → "@ them" | Right-click (long-press on touch / Enter on keyboard) any avatar | Makes that member a recipient, **does not auto-send**, and keeps the existing draft. On yourself it shows "@ yourself", which only leaves a note and triggers no model call. |
+| Type `@` and pick | Type `@` or full-width `＠` in the input box | Opens the room's member list; filter by display name/handle/role/alias; ↑↓ to move, Enter/Tab to pick, Esc to close. The first item is "Everyone", showing how many AI members would be reached. |
+| Type `@name` directly | e.g. `@backend, why did the API fields change?` | The server resolves it with deterministic rules into the same memberId list as the chip; no need to reopen the picker. |
 
-解析规则（`shared/mention-resolver.js`，前后端是**同一份代码**）：
+Resolution rules (`shared/mention-resolver.js`; frontend and backend are **the same code**):
 
-1. 先屏蔽正文结构——代码块、行内代码、`>` 引用行、链接目标、邮箱地址、URL——这些位置里的 `@` 不会唤醒任何人。
-2. `@` 前必须是文本开始、空白或允许的标点边界；`dev@example.com` 与 `@scope/pkg` 不触发。
-3. 先按唯一 handle 精确匹配（ASCII 大小写不敏感），再按唯一别名、唯一显示名（NFC 规范化）精确匹配。**不做 LLM 猜人**。
-4. 同一成员被不同形式点名只生成一份投递；芯片 + 文本重复点名也只投一次。
-5. 名称含空格时用 `@「前端 小林」`；`@前端 小林` 只按“前端”这个完整别名解析。
-6. `@前端你先看看` 这种没有名字边界的写法**不猜测拆分**，界面提示“请在名字后加空格或标点（例如 @前端）”。
-7. 重名、无法识别、成员已退出（旧别名 tombstone）都在发送前提示，可以选人或按普通文本发送——**不会静默改投主代理**。
-8. `@所有人` / `@all` 展开为**发送时**的活跃成员快照；`@用户` 只通知人类成员，不产生模型调用。
+1. Mask body structure first — fenced code blocks, inline code, `>` quote lines, link targets, email addresses and URLs; an `@` in those places wakes nobody.
+2. `@` must be at start of text, after whitespace, or after an allowed punctuation boundary; `dev@example.com` and `@scope/pkg` do not trigger.
+3. Match exact unique handles first (ASCII case-insensitive), then exact unique aliases and unique display names (NFC-normalized). **No LLM guessing of people**.
+4. Naming the same member in different forms produces a single delivery; chip plus text duplication also delivers once.
+5. For names containing spaces use `@「Frontend Lin」`; `@Frontend Lin` resolves only the complete alias "Frontend".
+6. Forms with no name boundary, such as `@frontendlookatthis`, are **never split by guessing**; the UI asks for a space or punctuation after the name (e.g. `@frontend`).
+7. Duplicate names, unrecognized names and members who have left (old alias tombstone) are all reported before sending; you can pick someone or send as plain text — **it never silently redirects to the coordinator**.
+8. `@everyone` / `@all` expands to the active-member snapshot **at send time**; `@user` only notifies human members and produces no model call.
 
-中文输入法处于 composition 阶段时，Enter 不会被抢走（不会把正在拼的汉字提前提交）；`Enter` 发送、`Shift+Enter` 换行。
+When a Chinese IME is in its composition stage, Enter is not stolen (it will not commit in-progress characters early); `Enter` sends and `Shift+Enter` inserts a newline.
 
-### 4.2 提交整体任务
+### 4.2 Submit the overall task
 
-在建群时填写“整体目标”，或直接在群里对主代理说一句整体目标（未点名时默认由主代理接收）。主代理随后：
+Fill in the "overall goal" when creating the room, or simply state it to the coordinator in the room (an unmentioned message goes to the coordinator by default). The coordinator then:
 
-1. 检查现状与约束；
-2. 通过群工具落盘结构化计划（工作项、依赖、验收条件、假设）；
-3. 校验提交（依赖无环、每项有验收条件、负责人存在）；
-4. 依赖满足的任务才进入 `ready` 并派发，未满足的保持可见的等待状态；
-5. 持续协调、组织验收。
+1. checks the current state and constraints;
+2. persists a structured plan through room tools (work items, dependencies, acceptance criteria, assumptions);
+3. validates the plan before submitting (no dependency cycles, every item has acceptance criteria, owners exist);
+4. dispatches only tasks whose dependencies are satisfied as `ready`; unsatisfied ones stay visible in a waiting state;
+5. keeps coordinating and organising acceptance.
 
-“先规划”模式下计划只落盘、不派发，等用户启动。
+In "plan first" mode the plan is only persisted and not dispatched; it waits for the user to start it.
 
-### 4.3 用户直接改需求
+### 4.3 The user changes a requirement directly
 
-`@前端 把这个入口改成手机验证码。` 这类明确指令走完整链路：保存原话 → 绑定目标任务 → 写成新的需求决定 revision（人类要求直接采纳）→ 标出确定性影响的任务并置 `needsSync` → 通知相关成员 → 要求每人回报同步状态。**旧版本的通过结果不能直接沿用**，必须按新版本重验。
+An explicit instruction such as `@frontend change this entry point to SMS verification.` goes through the full path: save the original words → bind the target task → write a new requirement decision revision (a human requirement is adopted directly) → mark the deterministically affected tasks as `needsSync` → notify the relevant members → require each to report its sync state. **Passing results from an old revision cannot be reused**; they must be re-verified against the new revision.
 
-“@前端 为什么这样设计？”是提问，不会自动变成改代码的任务。
-
----
-
-## 5. 群里能看到什么
-
-- **面板**：顶部是项目标题、状态、项目切换以及任务/成员入口。宽屏显示「项目群 / 时间线 / 任务与模型」三栏；空间不足时自动收起左右栏，入口变成抽屉，不会把聊天挤成一条缝。右上角的 `Aa` 提供**标准 / 大 / 特大**三档字号，选择保存在本机。
-- **时间线**：按天分隔；自己的消息在右侧气泡里，成员消息在左侧。代码围栏显示为代码块，行内代码、加粗与已投递的点名都有明确样式；悬停消息可以回复，或在输入框里 `@` 对方。
-- **输入区**：毛玻璃输入卡片；`@` 弹层支持键盘选择，引用条、接收人芯片与「将触达几位 AI 成员」的提示都在发送前可见。
-- **成员栏**：头像菜单提供 `@ 他`、查看成员、查看/切换模型、查看当前任务、暂停与退出；状态点与模型来源（成员固定/角色默认/项目默认/允许池）在行内可见。
-- **任务与模型**：同一栏分「任务 / 模型」两个标签。任务页有验收进度、任务卡（状态、版本、负责人、验收条件、依赖等待、产物核验状态）、项目决定与同步回执、投递与恢复；模型页是项目默认、角色默认、选型模式与允许池。
-- **项目生命周期**：左栏分「进行中 / 已归档 / 回收站」；右上角 `…` 提供暂停/恢复、归档、移入回收站、清理预览与永久删除。归档或回收站中的项目在界面上只读，不会执行、投递或唤醒成员；恢复只会回到暂停态。移入回收站默认保留 30 天（`trashRetentionDays`），永久删除需输入完整项目名并勾选确认，只清理插件私有数据；源代码、借用会话、worktree 与宿主日志默认保留，并留下最小审计墓碑。
-- **深度研究**：主代理或用户可提出一次带范围、成员与预算的研究提议；群时间线上出现需要真实用户点击的审批卡。批准只覆盖当前 `proposalRevision + scopeDigest`，不会自动开始；可以拒绝、取消或调整范围/预算（调整会生成新版本并让旧批准失效），批准过期后不能启动。点击“开始研究”后经 ResearchGate 再核对项目版本、批准与预算，批准后为参与成员建立**专用研究 Session**（带 `agent/pre-step` 门禁、每研究运行锁、普通群工具禁用、写入路径真实解析门禁和 session 级用量归属；受监督原型暂不允许研究 Session 执行 shell，实验仍在受监督模式下由成员执行）。运行中可暂停/停止；归档/回收站会停止研究、撤销批准并释放专用会话，恢复后不能复用旧批准。重启后运行中的研究进入 `PAUSED_RECONCILE`，必须由人核对后才能恢复；多人类项目因无法验证具体审批人而 fail-closed。研究工具为 `room_research_propose / get / start / hypothesis / experiment / finding / report / flowback`，没有代理可调用的批准或删除入口。
-- **投递状态是诚实的**：`已送达，尚未确认取用` 与 `对方本轮已取用` 是两个不同状态，后者只在宿主真实报告取用后才出现。无法确认时显示 `无法确认是否送达，正在核对`，并停止自动重发。
-- **技术细节**不塞进群聊：工具执行与自然发言分开呈现，群消息只显示有意义的信息。
-
-成员正常回答会自动回到群里（每个群驱动轮次的最终回答），因此不会出现“代理明明回答了，群里却看不到”。工作中需要提前说话时用 `room_send`。
+"@frontend why is it designed this way?" is a question and does not turn into a code task by itself.
 
 ---
 
-## 6. 权限与边界
+## 5. What you can see in the room
 
-- 作者身份由服务端根据真实调用者绑定，正文里写“我是老板”不会获得任何权限。
-- 群成员只能读写自己加入的群；工具不接受可伪造的 senderId。
-- 独立根会话显式应用项目的工作区与工具配置；设计/文档这类只做细节的成员会被**真正移除**写文件与 shell 工具（不是靠提示词请求它别改）。
-- 宿主原生权限提示仍归宿主管理；群里的聊天不会被当成原生批准。
-- **借用的用户会话**：插件不会销毁它，也不会把它与项目无关的轮次发到群里。
-- **生命周期操作只接受真实人类成员**：代理不能调用暂停、归档、回收站或永久删除，也不能用聊天内容伪造确认；永久删除还需要完整项目名与明确勾选。
-- 写入工作：git 仓库里每个写入尝试使用独立 worktree；非 git 或 worktree 创建失败时**明确降级为串行写入并说明原因**，不会声称已隔离。成员退出或失败后保留未合并变更，不自动删除工作目录。
+- **Panel**: the top bar has the project title, status, project switcher and task/member entries. Wide screens show three columns — "Project room / Timeline / Tasks and models"; when space is short the side columns collapse into drawers instead of squeezing the chat into a strip. The `Aa` control in the top-right offers **standard / large / extra-large** text sizes, stored on this machine.
+- **Timeline**: separated by day; your own messages sit in bubbles on the right, member messages on the left. Fenced code renders as code blocks, and inline code, bold text and delivered mentions have explicit styles; hover a message to reply, or `@` the other side in the input box.
+- **Input area**: a frosted-glass input card; the `@` popup supports keyboard selection, and the quote bar, recipient chips and the "how many AI members will be reached" hint are all visible before sending.
+- **Member column**: the avatar menu offers `@ them`, view member, view/switch model, view current task, pause and leave; status dots and model provenance (member-pinned / role default / project default / allowed pool) are visible inline.
+- **Tasks and models**: the same column has two tabs, "Tasks / Models". The Tasks page shows acceptance progress, task cards (status, revision, owner, acceptance criteria, dependency wait, artifact verification state), project decisions and sync receipts, deliveries and recovery; the Models page shows project defaults, role defaults, selection mode and the allowed pool.
+- **Project lifecycle**: the left column separates "Active / Archived / Recycle bin"; the `…` in the top-right offers pause/resume, archive, move to recycle bin, cleanup preview and permanent delete. Projects in the archive or recycle bin are read-only in the UI and never execute, deliver or wake members; restoring only returns them to paused. Moving to the recycle bin keeps 30 days by default (`trashRetentionDays`); permanent deletion requires typing the full project name and ticking a confirmation, and only cleans the plugin's private data; source code, borrowed sessions, worktrees and host logs are kept by default, with a minimal audit tombstone.
+- **Deep research**: the coordinator or the user can propose a research run with scope, members and a budget; an approval card that a real human must click appears on the room timeline. Approval covers only the current `proposalRevision + scopeDigest` and never starts the run by itself; it can be rejected, cancelled, or have its scope/budget adjusted (adjusting creates a new revision and invalidates the old approval), and an expired approval cannot start. Clicking "Start research" passes through ResearchGate, which re-checks the project revision, the approval and the budget; once approved, **dedicated research Sessions** are created for the participating members (with an `agent/pre-step` gate, a per-run lock, normal room tools disabled, write paths resolved through the real filesystem, and session-level usage attribution; the supervised prototype does not yet allow research Sessions to run shell, and experiments are still performed by members under supervision). A running research can be paused/stopped; archiving or trashing the project stops the research, revokes the approval and releases the dedicated sessions, and restoring cannot reuse the old approval. After a restart a running research enters `PAUSED_RECONCILE` and must be checked by a human before it can resume; multi-human projects fail closed because the specific approver cannot be verified. The research tools are `room_research_propose / get / start / hypothesis / experiment / finding / report / flowback`; there is no agent-callable approve or delete entry point.
+- **Delivery state is honest**: `delivered, use not yet confirmed` and `used by the recipient this turn` are two different states; the latter appears only after the host actually reports consumption. When it cannot be confirmed the UI shows `cannot confirm delivery, reconciling` and stops automatic resends.
+- **Technical details** do not spill into the room chat: tool execution and natural speech are presented separately, and group messages carry only meaningful information.
+
+A member's normal reply automatically returns to the room (the final answer of every room-driven turn), so "the agent answered but the room shows nothing" does not happen. To speak early while working, use `room_send`.
 
 ---
 
-## 7. 暂停、恢复、重启
+## 6. Permissions and boundaries
 
-| 操作 | 行为 |
+- Author identity is bound by the server from the real caller; writing "I am the boss" in the body grants no permission.
+- Room members can read and write only rooms they belong to; tools accept no forgeable senderId.
+- Independent root sessions explicitly apply the project's workspace and tool configuration; detail-only members such as design/docs have write and shell tools **really removed** (not asked to refrain via a prompt).
+- Host-native permission prompts remain owned by the host; chat in the room is never treated as native approval.
+- **Borrowed user sessions**: the plugin never destroys them, and never posts their turns unrelated to the project into the room.
+- **Lifecycle operations accept only real human members**: agents cannot call pause, archive, recycle-bin or permanent delete, nor forge confirmation from chat content; permanent deletion additionally requires the full project name and an explicit tick.
+- Write work: in a git repository every write attempt uses its own worktree; for non-git projects, or when worktree creation fails, the system **explicitly degrades to serialized writes and says why**, never claiming isolation. After a member leaves or fails, unmerged changes are kept and the working directory is not automatically deleted.
+
+---
+
+## 7. Pause, resume, restart
+
+| Operation | Behaviour |
 |---|---|
-| 暂停成员 | 停止该成员新的自动执行；消息与任务保留，新 `@` 显示为待处理。 |
-| 恢复成员 | 先同步版本与未处理消息，再继续适用的任务。 |
-| 停止当前工作 | 请求取消当前轮次，保留待处理队列（不承诺已执行的动作被回滚）。 |
-| 成员退出本群 | 终止新分配，保留历史作者身份；旧别名变 tombstone 不再误投新人；未完成任务转为待交接。 |
-| 暂停项目 | 先阻断新任务准入与成员唤醒，再请求停止运行中的成员；只有重新读取到成员已停止才进入“已暂停”，否则停在“停止未确认”，可重试核对或取消请求。 |
-| 恢复项目 | 只把已暂停项目恢复为 `active`，并重新校验/创建成员会话；失败会逐人报告。 |
-| 归档项目 | 先阻断执行并请求停止；确认停止后归档，保留消息、任务、决定、成果与模型绑定历史；恢复后回到“已暂停”，不会自动启动。 |
-| 移入回收站 | 立即进入停止阻断态并请求停止；确认停止后才写入可恢复快照并进入回收站；未确认时不会宣称“已删除”；源代码、借用会话、worktree 默认不删；默认提示保留 30 天。 |
-| 从回收站恢复 | 先校验移入时记录的结构快照与资源摘要，再恢复为“已暂停”；不重放旧副作用、不恢复旧审批。 |
-| 停止核对 / 取消请求 | 停止结果未知时项目显示“停止未确认”，可重试核对真实成员状态；尚未造成不可逆删除的请求可以取消并回到原状态。 |
-| 永久删除 | 只允许在回收站中执行；要求完整项目名与明确勾选，拒绝仍有成员运行的项目；逐项释放插件独占资源，全部成功后删除插件私有数据并保留最小审计墓碑；部分释放失败会停在“清理受阻”，保留数据并可重试。 |
-| 关闭群界面 | 只关闭视图，已启动任务继续。 |
-| 重启 Harness | 按群数据库恢复：群、成员、消息、任务、决定与投递账本；**只恢复 active 项目**的 owned 成员会话（暂停/归档/回收站的不恢复），不确定的投递在核对后才重试，并给出简短恢复报告。 |
+| Pause member | Stops that member's new automatic execution; messages and tasks are kept, and new `@` mentions show as pending. |
+| Resume member | Syncs revision and unprocessed messages first, then continues applicable tasks. |
+| Stop current work | Requests cancellation of the current turn and keeps the pending queue (already-executed actions are not promised to be rolled back). |
+| Member leaves the room | Ends new assignment and keeps historical authorship; old aliases become tombstones so they no longer mis-deliver to newcomers; unfinished tasks become pending handover. |
+| Pause project | Blocks new task admission and member wake-ups first, then requests running members to stop; only after re-reading that members have stopped does it enter "paused", otherwise it stays at "stop unconfirmed", with retry-check or cancel-request available. |
+| Resume project | Restores only a paused project to `active` and re-validates/creates member sessions; failures are reported per member. |
+| Archive project | Blocks execution and requests stop first; archives after stop is confirmed, keeping messages, tasks, decisions, outcomes and model-binding history; restoring returns it to "paused" and never auto-starts. |
+| Move to recycle bin | Immediately enters the stop-blocking state and requests stop; writes a recoverable snapshot and enters the recycle bin only after stop is confirmed; it never claims "deleted" while unconfirmed; source code, borrowed sessions and worktrees are not deleted by default; the default notice keeps 30 days. |
+| Restore from recycle bin | Verifies the structural snapshot and resource summary recorded when moved, then restores to "paused"; old side effects are not replayed and old approvals are not restored. |
+| Stop reconciliation / cancel request | When the stop result is unknown the project shows "stop unconfirmed"; the real member state can be re-checked; a request that has not yet caused irreversible deletion can be cancelled and return to the previous state. |
+| Permanent delete | Allowed only from the recycle bin; requires the full project name and an explicit tick, and refuses projects that still have running members; releases plugin-exclusive resources one by one, and only when all succeed deletes the plugin's private data while keeping a minimal audit tombstone; a partial release failure stops at "cleanup blocked", keeping data and allowing an idempotent retry. |
+| Close the room UI | Closes the view only; already-started tasks continue. |
+| Restart Harness | Recovers from the room database: rooms, members, messages, tasks, decisions and the delivery ledger; **only restores owned member sessions of active projects** (paused/archived/recycle-bin ones are not restored), uncertain deliveries are retried only after reconciliation, and a short recovery report is given. |
 
-数据库使用 schemaVersion 与迁移前备份；单写者锁保证不会有第二个进程同时改同一个项目。若第二个实例尝试打开同一份数据，会被明确拒绝。
-
----
-
-## 8. 已知限制
-
-这里只列最需要先知道的几条：
-
-- **成员会话的文件与命令工具来自 `memberAgentPreset`**：不配置时成员只有群协作类工具。预设是**两段契约**——
-  `meta.agentPreset` 只写会话头，真正的工具树由 `agentPresets.mount()` 挂到成员上下文上；插件两件都做
-  （create 与 resume 都挂），**两条路径都已在真实宿主验证**：成员真跑 `node --version`、真写文件并通过验收。
-- **生命周期操作不会假装成员已停止**：归档/回收站会先阻断新执行，再请求停止，并**重新读取真实 agent 状态**；只有确认停止才进入目标状态，否则停在“停止未确认”（`BLOCKED`）。真实桌面端已实测：停止请求已发出时 `confirmed=false`，随后核对成功才归档。
-- **项目生命周期是软删除闭环，不是“删库”**：移入回收站只改变项目状态并保留全部插件数据；永久删除只清理该项目的插件私有记录、资源归属账本与插件拥有的会话，**绝不默认删除源代码、用户工作区、借用会话、worktree 或宿主日志**。插件无法证明清理的外部副本会如实保留并报告。回收站到期只做日期提示，**不会自动清除**。部分资源释放失败会进入“清理受阻”（`PURGE_BLOCKED`），保留数据并允许幂等重试。
-- **可选源码 / 临时文件 / worktree 清理未实现**：规范里的高级清理需要独立危险操作、逐路径授权、归属核验和宿主删除回执；本版不提供，清理预览会明确列出被保留的源码、worktree 与宿主日志。任何“清理源码”的操作都不应被当作已支持。
-- **删除与研究审批都要求可验证的人类身份**：项目里有多个活跃人类成员时，生命周期操作与研究审批会 fail-closed，而不是猜一个审批人。
-- **深度研究是受监督原型，不是完整自主研究**：已实现审批卡、scopeDigest/revision、取消/过期、预算预留、专用研究 Session（`agent/pre-step` 门禁、运行锁、按 researchId 精确归属用量、写入路径真实解析与 shell 禁用）、暂停/停止、归档/回收站撤销授权，以及可自动化的权限与恢复测试。**尚未实现**：共享成员会话的调用前拦截、自动研究编排/阶段循环、经验提示的产品层治理，以及完整真实研究演示。
-- **插件必须被选为 bundle 才会生效**。`installed: true` + `enabled: false` 时，插件的
-  `cordis.patch.yml` 整个不生效、loader 树里没有它的行，**而且没有任何报错**。
-- **跨提供方**验收需要宿主真实接入第二个提供方；只有一条路由时，跨提供方兼容性标为未实测。
-- **价格与费用**只记真实用量，**不显示金额**（无可靠价目来源时留空而不编造）。
-- `steer`（运行中于步骤边界插入）与 `queue`（排到下一轮）的实际差异需要一次长工具调用来观察；界面会显示这一次**实际**用的是哪种。
-- 群里的“活人感”是行为目标，不是提示词存在即成立：验收看的是真实依据、后续行动与产物，不按消息条数或情绪词评分。
-- 非 git 项目没有文件系统级隔离，串行写入只是协作机制，不能阻止所有 shell 写入。
-- 多窗口/多进程同时管理同一项目：单写者锁会拒绝第二个写入者。
-- **源码热重载需要配置监听目录**：插件若通过 junction 链接到 profile 之外，HMR 默认看不到 `src/`；把仓库目录加入 profile 的 `hmr.root` 即可就地重载，否则改完 `src/` 需要重载宿主。
+The database uses a schemaVersion and a backup before migration; a single-writer lock guarantees no second process modifies the same project at the same time. If a second instance tries to open the same data, it is explicitly refused.
 
 ---
 
-## 9. 开发与验证
+## 8. Known limitations
+
+Only the most important ones to know first:
+
+- **File and command tools for member sessions come from `memberAgentPreset`**: without it, members only have room-collaboration tools. The preset is a **two-part contract** — `meta.agentPreset` only writes the session header, and the real tool tree is mounted onto the member context by `agentPresets.mount()`; the plugin does both (both create and resume), and **both paths have been verified in the real host**: members really ran `node --version`, really wrote files, and passed acceptance.
+- **Lifecycle operations never pretend a member has stopped**: archive/recycle-bin blocks new execution first, then requests stop and **re-reads the real agent state**; only a confirmed stop enters the target state, otherwise it stays at "stop unconfirmed" (`BLOCKED`). Verified on the real desktop app: while the stop request was in flight `confirmed=false`, and only after reconciliation succeeded was the project archived.
+- **Project lifecycle is a soft-delete loop, not "dropping the database"**: moving to the recycle bin only changes the project state and keeps all plugin data; permanent deletion only clears the project's plugin-private records, the resource-ownership ledger and plugin-owned sessions, and **never deletes source code, user workspaces, borrowed sessions, worktrees or host logs by default**. External copies the plugin cannot prove cleaned are honestly kept and reported. Recycle-bin expiry only shows a date hint and **never auto-purges**. A partial resource release enters "cleanup blocked" (`PURGE_BLOCKED`), keeps the data and allows an idempotent retry.
+- **Optional source / temp-file / worktree cleanup is not implemented**: the advanced cleanup in the spec needs a separate dangerous operation, per-path authorization, ownership verification and a host deletion receipt; this version does not provide it, and the cleanup preview explicitly lists the source code, worktrees and host logs that are kept. Any "clean the source code" action must not be treated as supported.
+- **Deletion and research approval both require a verifiable human identity**: when a project has multiple active human members, lifecycle operations and research approval fail closed instead of guessing an approver.
+- **Deep research is a supervised prototype, not fully autonomous research**: it implements the approval card, scopeDigest/revision, cancel/expiry, budget reservation, dedicated research Sessions (`agent/pre-step` gate, run lock, exact usage attribution by researchId, real-path resolution for writes, shell disabled), pause/stop, archive/recycle-bin grant revocation, and automatable permission and recovery tests. **Not yet implemented**: pre-call interception on shared member sessions, automatic research orchestration/phase loops, product-level management of experience hints, and a complete real research demonstration.
+- **The plugin takes effect only when selected as a bundle.** With `installed: true` + `enabled: false`, the plugin's `cordis.patch.yml` does not apply at all, its row is absent from the loader tree, **and no error is reported**.
+- **Cross-provider** acceptance requires the host to really wire up a second provider; with only one route, cross-provider compatibility is marked as unmeasured.
+- **Prices and cost** record real usage only and **show no amounts** (left empty rather than fabricated when there is no reliable price source).
+- The practical difference between `steer` (insert at a step boundary while running) and `queue` (queue for the next turn) requires a long tool call to observe; the UI shows which one a given delivery **actually** used.
+- The "alive" feel in the room is a behavioural goal, not something a prompt alone achieves: acceptance looks at real evidence, follow-up actions and artifacts, not message count or emotional wording.
+- Non-git projects have no filesystem-level isolation; serialized writes are only a collaboration mechanism and cannot prevent all shell writes.
+- Managing the same project from multiple windows/processes: the single-writer lock refuses the second writer.
+- **Source hot reload needs a watched directory**: if the plugin is linked to the profile via a junction outside the profile, HMR does not see `src/` by default; add the repository directory to the profile's `hmr.root` to reload in place, otherwise changing `src/` requires reloading the host.
+
+---
+
+## 9. Development and verification
 
 ```powershell
-# 生成浏览器半边（从 shared/ 的唯一来源生成，禁止手改生成文件）
+# Generate the browser half (from the single source in shared/; never hand-edit generated files)
 node scripts/build-client.mjs
 
-# 语法闸门 + 生成物是否最新
+# Syntax gate + generated file up to date
 npm run check
 
-# 单元测试（@ 解析规则、存储/序列/幂等/版本冲突/单写者）
+# Unit tests (@ resolution rules, storage/sequence/idempotency/version conflicts/single writer)
 npm run test
 
-# 浏览器半边的真实 Chromium 加载校验
+# Real Chromium load check of the browser half
 npm run harness
 
-# 打包并核对包内容
+# Pack and verify the package contents
 npm run pack:verify
 ```
